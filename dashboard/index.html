@@ -1,0 +1,337 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Executive Summary — Brick for Brains</title>
+  <link rel="stylesheet" href="css/styles.css">
+</head>
+<body>
+
+<!-- Sidebar -->
+<aside class="sidebar">
+  <div class="sidebar__brand">
+    <h1>Brick for Brains</h1>
+    <div class="subtitle">Autonomous Control System</div>
+  </div>
+  <nav class="sidebar__nav">
+    <div class="nav-section">Dashboard</div>
+    <a href="index.html" class="active">Executive Summary</a>
+    <a href="prd.html">PRD &amp; Architecture</a>
+    <a href="frd.html">Functional Requirements</a>
+    <div class="nav-section">Quick Links</div>
+    <a href="prd.html#section-5">MVP Scope (Phase 1)</a>
+    <a href="prd.html#section-7">Technical Recommendations</a>
+    <a href="frd.html">Requirement Tracker</a>
+  </nav>
+  <div class="sidebar__footer">
+    Last updated: <span id="last-updated">--</span>
+  </div>
+</aside>
+
+<!-- Mobile overlay -->
+<div class="sidebar-overlay"></div>
+
+<!-- Main content -->
+<div class="main">
+
+  <!-- Top bar -->
+  <header class="topbar">
+    <button class="hamburger" aria-label="Toggle navigation">&#9776;</button>
+    <div class="topbar__title">Executive Summary</div>
+    <div class="topbar__meta">Brick for Brains v0.1 &mdash; Planning Phase</div>
+  </header>
+
+  <!-- Content -->
+  <div class="content">
+
+    <!-- Project Overview -->
+    <div class="card">
+      <div class="card__header">
+        <h2 class="card__title">Project Overview</h2>
+        <span class="badge badge--planning">Planning</span>
+      </div>
+      <p class="overview-text">
+        The Brick for Brains is an autonomous combat robotics system that uses computer vision to track robots in an 8x8ft beetleweight arena, make real-time strategic decisions, and control our robot to push the opponent into a corner pit &mdash; all without human intervention during a match. The system combines an overhead OAK-D Pro camera, ArUco marker tracking, depth-based enemy detection, a behavior-tree strategy engine, and WiFi-based ESP32 motor control to achieve fully autonomous combat.
+      </p>
+    </div>
+
+    <!-- Key Metrics -->
+    <div class="grid grid--4 mb-6">
+      <div class="metric-card">
+        <div class="metric-card__value">60 FPS</div>
+        <div class="metric-card__label">Target Camera Frame Rate</div>
+      </div>
+      <div class="metric-card metric-card--accent">
+        <div class="metric-card__value">&lt;30ms</div>
+        <div class="metric-card__label">Target End-to-End Latency</div>
+      </div>
+      <div class="metric-card">
+        <div class="metric-card__value">8x8 ft</div>
+        <div class="metric-card__label">Arena Dimensions</div>
+      </div>
+      <div class="metric-card metric-card--success">
+        <div class="metric-card__value">3 lb</div>
+        <div class="metric-card__label">Beetleweight Class</div>
+      </div>
+    </div>
+
+    <!-- Project Status & Phases -->
+    <div class="section-header">
+      <h2>Project Status</h2>
+      <p>Phase breakdown and current progress</p>
+    </div>
+
+    <div class="grid grid--3 mb-6">
+      <!-- Phase 1 -->
+      <div class="phase-card phase-card--active">
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px;">
+          <h3>Phase 1 &mdash; MVP</h3>
+          <span class="badge badge--planning">Planning</span>
+        </div>
+        <ul>
+          <li>Arena calibration via ArUco corners</li>
+          <li>Our robot tracking (ArUco tag)</li>
+          <li>Enemy tracking (background subtraction + depth)</li>
+          <li>Basic pursuit strategy</li>
+          <li>ESP32 motor commands over WiFi</li>
+          <li>Minimal dashboard (live view + joystick)</li>
+        </ul>
+      </div>
+
+      <!-- Phase 2 -->
+      <div class="phase-card phase-card--future">
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px;">
+          <h3>Phase 2 &mdash; Enhanced</h3>
+          <span class="badge badge--not-started">Not Started</span>
+        </div>
+        <ul>
+          <li>Full strategy engine with configurable behaviors</li>
+          <li>IMU sensor fusion (EKF)</li>
+          <li>Match recording and playback</li>
+          <li>Strategy configuration UI</li>
+          <li>Advanced enemy tracking (Kalman filter)</li>
+        </ul>
+      </div>
+
+      <!-- Phase 3 -->
+      <div class="phase-card phase-card--future">
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px;">
+          <h3>Phase 3 &mdash; Advanced</h3>
+          <span class="badge badge--not-started">Not Started</span>
+        </div>
+        <ul>
+          <li>ML-based enemy behavior prediction</li>
+          <li>Automated strategy tuning from recordings</li>
+          <li>Multi-camera support for redundancy</li>
+        </ul>
+      </div>
+    </div>
+
+    <!-- Milestones Timeline -->
+    <div class="card">
+      <div class="card__header">
+        <h2 class="card__title">Key Milestones</h2>
+      </div>
+      <div class="timeline">
+        <div class="timeline__item">
+          <div class="timeline__dot timeline__dot--active"></div>
+          <div class="timeline__label">Arena Calibration System</div>
+          <div class="timeline__desc">Phase 1 &mdash; Guided 4-corner ArUco calibration with homography transform</div>
+        </div>
+        <div class="timeline__item">
+          <div class="timeline__dot"></div>
+          <div class="timeline__label">ArUco Robot Tracking</div>
+          <div class="timeline__desc">Phase 1 &mdash; Track our robot via ceiling-mounted camera with ArUco markers</div>
+        </div>
+        <div class="timeline__item">
+          <div class="timeline__dot"></div>
+          <div class="timeline__label">Enemy Detection (Markerless)</div>
+          <div class="timeline__desc">Phase 1 &mdash; Depth thresholding + background subtraction for enemy robot</div>
+        </div>
+        <div class="timeline__item">
+          <div class="timeline__dot"></div>
+          <div class="timeline__label">Basic Pursuit Strategy</div>
+          <div class="timeline__desc">Phase 1 &mdash; Drive toward enemy and push toward the pit</div>
+        </div>
+        <div class="timeline__item">
+          <div class="timeline__dot"></div>
+          <div class="timeline__label">ESP32 Motor Control</div>
+          <div class="timeline__desc">Phase 1 &mdash; WiFi UDP commands with 200ms failsafe timeout</div>
+        </div>
+        <div class="timeline__item">
+          <div class="timeline__dot"></div>
+          <div class="timeline__label">Web Admin Dashboard</div>
+          <div class="timeline__desc">Phase 1 &mdash; Minimal live view, manual joystick override, connection status</div>
+        </div>
+        <div class="timeline__item">
+          <div class="timeline__dot"></div>
+          <div class="timeline__label">Full Strategy Engine</div>
+          <div class="timeline__desc">Phase 2 &mdash; Behavior tree with pursue, position, push, retreat, avoid-pit</div>
+        </div>
+        <div class="timeline__item">
+          <div class="timeline__dot"></div>
+          <div class="timeline__label">IMU Sensor Fusion</div>
+          <div class="timeline__desc">Phase 2 &mdash; EKF-based fusion of camera + IMU for high-frequency pose estimation</div>
+        </div>
+        <div class="timeline__item">
+          <div class="timeline__dot"></div>
+          <div class="timeline__label">ML-Based Prediction</div>
+          <div class="timeline__desc">Phase 3 &mdash; Neural network enemy behavior prediction and strategy tuning</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Team Section -->
+    <div class="section-header">
+      <h2>Team</h2>
+      <p>Project contributors and their roles</p>
+    </div>
+    <div class="team-grid mb-6">
+      <div class="team-member">
+        <div class="team-member__avatar">TL</div>
+        <div class="team-member__name">Team Lead</div>
+        <div class="team-member__role">Project coordination</div>
+      </div>
+      <div class="team-member">
+        <div class="team-member__avatar">R</div>
+        <div class="team-member__name">Researcher</div>
+        <div class="team-member__role">CV tracking, combat robotics, camera systems</div>
+      </div>
+      <div class="team-member">
+        <div class="team-member__avatar">EM</div>
+        <div class="team-member__name">Engineering Manager</div>
+        <div class="team-member__role">Architecture, algorithms, performance</div>
+      </div>
+      <div class="team-member">
+        <div class="team-member__avatar">PM</div>
+        <div class="team-member__name">TPM</div>
+        <div class="team-member__role">Project management, documentation, dashboards</div>
+      </div>
+    </div>
+
+    <!-- Key Technical Decisions -->
+    <div class="card">
+      <div class="card__header">
+        <h2 class="card__title">Key Technical Decisions</h2>
+        <span class="text-sm text-secondary">Source: PRD Section 7</span>
+      </div>
+      <div class="table-wrapper">
+        <table class="decisions-table">
+          <thead>
+            <tr>
+              <th>Area</th>
+              <th>Decision</th>
+              <th>Rationale</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td>Camera</td>
+              <td>OAK-D Pro, 1080p/60fps, fixed-focus</td>
+              <td>Standard 69 HFOV covers 8ft arena from 7ft height. Fixed-focus avoids hunting. 1080p/60fps is the best balance of resolution and frame rate.</td>
+            </tr>
+            <tr>
+              <td>Mounting</td>
+              <td>6-7ft above arena floor</td>
+              <td>Covers full arena with standard lens FOV. Provides ~240 px/ft resolution at 1080p &mdash; sufficient for 3-inch ArUco markers.</td>
+            </tr>
+            <tr>
+              <td>Tracking</td>
+              <td>ArUco 4x4_50 (3-inch markers)</td>
+              <td>Fewest bits = most robust at distance. Only ~7 unique IDs needed. Markers appear as ~60px at 1080p from 7ft.</td>
+            </tr>
+            <tr>
+              <td>Enemy Detection</td>
+              <td>Depth thresholding + background subtraction</td>
+              <td>Hybrid approach: depth finds objects above floor plane, appearance-based fallback for low-profile robots.</td>
+            </tr>
+            <tr>
+              <td>Communication</td>
+              <td>WiFi UDP to ESP32, &lt;20ms target</td>
+              <td>5-15ms RTT meets target. No bridge ESP32 needed (unlike ESP-NOW). Simple asyncio integration.</td>
+            </tr>
+            <tr>
+              <td>Stack</td>
+              <td>Python (DepthAI + FastAPI) + React</td>
+              <td>Native OAK-D support, OpenCV ArUco built-in, WebSocket support for live data, rich interactive UI.</td>
+            </tr>
+            <tr>
+              <td>Exposure</td>
+              <td>Manual, 400-500 microseconds</td>
+              <td>Freezes robot motion at 8 ft/s to &lt;1 pixel of blur. Arena LED lighting compensates for reduced exposure.</td>
+            </tr>
+            <tr>
+              <td>Sensor Fusion</td>
+              <td>Complementary filter (MVP), EKF (Phase 2)</td>
+              <td>Complementary filter is simpler to implement. EKF upgrade in Phase 2 for better accuracy.</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+
+    <!-- Risk Register -->
+    <div class="card">
+      <div class="card__header">
+        <h2 class="card__title">Risk Register</h2>
+        <span class="text-sm text-secondary">Source: PRD Section 7.7</span>
+      </div>
+      <div class="table-wrapper">
+        <table>
+          <thead>
+            <tr>
+              <th>Risk</th>
+              <th>Impact</th>
+              <th>Mitigation</th>
+              <th>Status</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td>Depth accuracy marginal at 2m range</td>
+              <td><span class="risk-high">High</span></td>
+              <td>Combine depth with appearance-based detection; do not rely on depth alone</td>
+              <td><span class="badge badge--planning">Monitoring</span></td>
+            </tr>
+            <tr>
+              <td>Motion blur despite short exposure</td>
+              <td><span class="risk-medium">Medium</span></td>
+              <td>Set exposure to 400-500us; increase ISO; accept slightly noisier image</td>
+              <td><span class="badge badge--planning">Monitoring</span></td>
+            </tr>
+            <tr>
+              <td>WiFi latency spikes in arena</td>
+              <td><span class="risk-high">High</span></td>
+              <td>Use dedicated AP; disable power saving; implement command prediction on ESP32</td>
+              <td><span class="badge badge--planning">Monitoring</span></td>
+            </tr>
+            <tr>
+              <td>ArUco occluded during collisions</td>
+              <td><span class="risk-medium">Medium</span></td>
+              <td>IMU-based dead reckoning during occlusion (up to 500ms); bottom marker as backup</td>
+              <td><span class="badge badge--planning">Monitoring</span></td>
+            </tr>
+            <tr>
+              <td>Logo on floor confuses background subtraction</td>
+              <td><span class="risk-medium">Medium</span></td>
+              <td>Mask logo region using calibration data; prioritize depth-based detection</td>
+              <td><span class="badge badge--planning">Monitoring</span></td>
+            </tr>
+            <tr>
+              <td>Autonomous class uses different arena format</td>
+              <td><span class="risk-high">High</span></td>
+              <td>Verify with event organizers; architecture supports configurable arena geometry</td>
+              <td><span class="badge badge--in-progress">Investigating</span></td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+
+  </div><!-- /content -->
+</div><!-- /main -->
+
+<script src="js/dashboard.js"></script>
+</body>
+</html>

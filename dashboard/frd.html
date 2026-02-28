@@ -1,0 +1,1001 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Functional Requirements — Brick for Brains</title>
+  <link rel="stylesheet" href="css/styles.css">
+</head>
+<body>
+
+<!-- Sidebar -->
+<aside class="sidebar">
+  <div class="sidebar__brand">
+    <h1>Brick for Brains</h1>
+    <div class="subtitle">Autonomous Control System</div>
+  </div>
+  <nav class="sidebar__nav">
+    <div class="nav-section">Dashboard</div>
+    <a href="index.html">Executive Summary</a>
+    <a href="prd.html">PRD &amp; Architecture</a>
+    <a href="frd.html" class="active">Functional Requirements</a>
+    <div class="nav-section">Quick Links</div>
+    <a href="prd.html#section-5">MVP Scope (Phase 1)</a>
+    <a href="prd.html#section-7">Technical Recommendations</a>
+    <a href="frd.html">Requirement Tracker</a>
+  </nav>
+  <div class="sidebar__footer">
+    Last updated: <span id="last-updated">--</span>
+  </div>
+</aside>
+
+<!-- Mobile overlay -->
+<div class="sidebar-overlay"></div>
+
+<!-- Main content -->
+<div class="main">
+
+  <!-- Top bar -->
+  <header class="topbar">
+    <button class="hamburger" aria-label="Toggle navigation">&#9776;</button>
+    <div class="topbar__title">Functional Requirements Document</div>
+    <div class="topbar__meta">Derived from PRD v1.0</div>
+  </header>
+
+  <!-- Content -->
+  <div class="content">
+
+    <div class="card mb-6">
+      <p class="overview-text">
+        This document captures all functional requirements derived from the Product Requirements Document. Each requirement is traceable back to a PRD section, assigned a priority level (P0 = MVP, P1 = Phase 2, P2 = Phase 3), and includes acceptance criteria. Click any row to expand details.
+      </p>
+    </div>
+
+    <!-- Category Tabs -->
+    <div class="tabs">
+      <button class="tab-btn active" data-category="all">All <span class="count-badge" id="filter-count">0</span></button>
+      <button class="tab-btn" data-category="CAL">Calibration</button>
+      <button class="tab-btn" data-category="TRK">Our Robot Tracking</button>
+      <button class="tab-btn" data-category="ENM">Enemy Tracking</button>
+      <button class="tab-btn" data-category="STR">Strategy Engine</button>
+      <button class="tab-btn" data-category="COM">ESP32 Comms</button>
+      <button class="tab-btn" data-category="WEB">Web Dashboard</button>
+      <button class="tab-btn" data-category="PRF">Performance</button>
+    </div>
+
+    <!-- Filters -->
+    <div class="filter-bar">
+      <div>
+        <label for="filter-category">Category:</label>
+        <select id="filter-category">
+          <option value="all">All Categories</option>
+          <option value="CAL">Calibration (CAL)</option>
+          <option value="TRK">Our Robot Tracking (TRK)</option>
+          <option value="ENM">Enemy Tracking (ENM)</option>
+          <option value="STR">Strategy Engine (STR)</option>
+          <option value="COM">ESP32 Comms (COM)</option>
+          <option value="WEB">Web Dashboard (WEB)</option>
+          <option value="PRF">Performance (PRF)</option>
+        </select>
+      </div>
+      <div>
+        <label for="filter-priority">Priority:</label>
+        <select id="filter-priority">
+          <option value="all">All Priorities</option>
+          <option value="P0">P0 — MVP</option>
+          <option value="P1">P1 — Phase 2</option>
+          <option value="P2">P2 — Phase 3</option>
+        </select>
+      </div>
+      <div>
+        <label for="filter-search">Search:</label>
+        <input type="text" id="filter-search" placeholder="Search requirements...">
+      </div>
+    </div>
+
+    <!-- Requirements Table -->
+    <div class="card" style="padding:0;overflow:hidden;">
+      <div class="table-wrapper">
+        <table id="frd-table">
+          <thead>
+            <tr>
+              <th style="width:30px;"></th>
+              <th style="width:120px;">ID</th>
+              <th>Title</th>
+              <th style="width:80px;">Priority</th>
+              <th style="width:100px;">Source</th>
+            </tr>
+          </thead>
+          <tbody>
+
+            <!-- ============ CALIBRATION (CAL) ============ -->
+
+            <tr class="fr-row" data-category="CAL" data-priority="P0" data-detail="detail-cal-001">
+              <td><span class="chevron"></span></td>
+              <td>FR-CAL-001</td>
+              <td>Guided 4-corner calibration via ArUco markers</td>
+              <td><span class="badge badge--p0">P0</span></td>
+              <td>PRD 2.1</td>
+            </tr>
+            <tr class="fr-detail" id="detail-cal-001" style="display:none;">
+              <td colspan="5"><div class="fr-detail__inner">
+                <dt>Description</dt>
+                <dd>System shall support a guided calibration flow where the operator places a single ArUco tag at each of the four arena corners sequentially. The system prompts for each corner placement in order and captures the position.</dd>
+                <dt>Acceptance Criteria</dt>
+                <dd>- System displays clear prompts for each corner (1 through 4) in sequence<br>- Each corner is captured when the ArUco marker is detected and confirmed<br>- All four corners must be captured before calibration is considered complete<br>- Visual feedback confirms each successful capture</dd>
+                <dt>Source</dt>
+                <dd>PRD Section 2.1 — Arena Calibration</dd>
+              </div></td>
+            </tr>
+
+            <tr class="fr-row" data-category="CAL" data-priority="P0" data-detail="detail-cal-002">
+              <td><span class="chevron"></span></td>
+              <td>FR-CAL-002</td>
+              <td>Compute homography transform from camera to arena coordinates</td>
+              <td><span class="badge badge--p0">P0</span></td>
+              <td>PRD 2.1</td>
+            </tr>
+            <tr class="fr-detail" id="detail-cal-002" style="display:none;">
+              <td colspan="5"><div class="fr-detail__inner">
+                <dt>Description</dt>
+                <dd>After capturing all four corners, the system shall compute a homography transform that maps camera pixel coordinates to arena coordinates (0,0 to 8,8 in feet).</dd>
+                <dt>Acceptance Criteria</dt>
+                <dd>- Homography matrix is computed from the 4 corner correspondences<br>- Any pixel within the arena can be mapped to arena coordinates with &lt;0.5 inch accuracy<br>- Transform is validated against known positions before use</dd>
+                <dt>Source</dt>
+                <dd>PRD Section 2.1 — Arena Calibration</dd>
+              </div></td>
+            </tr>
+
+            <tr class="fr-row" data-category="CAL" data-priority="P0" data-detail="detail-cal-003">
+              <td><span class="chevron"></span></td>
+              <td>FR-CAL-003</td>
+              <td>Identify pit location via dedicated ArUco marker</td>
+              <td><span class="badge badge--p0">P0</span></td>
+              <td>PRD 2.1</td>
+            </tr>
+            <tr class="fr-detail" id="detail-cal-003" style="display:none;">
+              <td colspan="5"><div class="fr-detail__inner">
+                <dt>Description</dt>
+                <dd>System shall identify the pit location and boundary using a dedicated ArUco marker (ID 4) placed at or near the pit during calibration.</dd>
+                <dt>Acceptance Criteria</dt>
+                <dd>- Pit ArUco marker (ID 4) is detected and its position recorded<br>- Pit boundary is established in arena coordinates<br>- Pit zone is available to the strategy engine for avoidance logic</dd>
+                <dt>Source</dt>
+                <dd>PRD Section 2.1 — Arena Calibration; PRD Section 7.2 — ArUco Markers</dd>
+              </div></td>
+            </tr>
+
+            <tr class="fr-row" data-category="CAL" data-priority="P0" data-detail="detail-cal-004">
+              <td><span class="chevron"></span></td>
+              <td>FR-CAL-004</td>
+              <td>Persist calibration data within a session</td>
+              <td><span class="badge badge--p0">P0</span></td>
+              <td>PRD 2.1</td>
+            </tr>
+            <tr class="fr-detail" id="detail-cal-004" style="display:none;">
+              <td colspan="5"><div class="fr-detail__inner">
+                <dt>Description</dt>
+                <dd>Calibration data (corner positions, homography matrix, pit location) shall persist so it survives restarts within a session.</dd>
+                <dt>Acceptance Criteria</dt>
+                <dd>- Calibration data is saved to disk after successful calibration<br>- On restart, previously saved calibration is loaded automatically<br>- User can verify loaded calibration is still valid</dd>
+                <dt>Source</dt>
+                <dd>PRD Section 2.1 — Arena Calibration</dd>
+              </div></td>
+            </tr>
+
+            <tr class="fr-row" data-category="CAL" data-priority="P0" data-detail="detail-cal-005">
+              <td><span class="chevron"></span></td>
+              <td>FR-CAL-005</td>
+              <td>Manual adjustment of calibration via web dashboard</td>
+              <td><span class="badge badge--p0">P0</span></td>
+              <td>PRD 2.1</td>
+            </tr>
+            <tr class="fr-detail" id="detail-cal-005" style="display:none;">
+              <td colspan="5"><div class="fr-detail__inner">
+                <dt>Description</dt>
+                <dd>The web dashboard shall allow manual adjustment of arena bounds post-calibration and support re-calibration without full system restart.</dd>
+                <dt>Acceptance Criteria</dt>
+                <dd>- Corner positions can be adjusted via drag-and-drop on the arena map<br>- Pit boundary can be adjusted<br>- Re-calibration can be triggered from the dashboard<br>- Calibration profiles can be saved and loaded</dd>
+                <dt>Source</dt>
+                <dd>PRD Section 2.1 &amp; 2.6 — Calibration Dashboard</dd>
+              </div></td>
+            </tr>
+
+            <tr class="fr-row" data-category="CAL" data-priority="P0" data-detail="detail-cal-006">
+              <td><span class="chevron"></span></td>
+              <td>FR-CAL-006</td>
+              <td>Capture clean background reference frame during calibration</td>
+              <td><span class="badge badge--p0">P0</span></td>
+              <td>PRD 7.3</td>
+            </tr>
+            <tr class="fr-detail" id="detail-cal-006" style="display:none;">
+              <td colspan="5"><div class="fr-detail__inner">
+                <dt>Description</dt>
+                <dd>During calibration (with no robots in the arena), the system shall capture a clean background reference frame for use in enemy detection via frame differencing.</dd>
+                <dt>Acceptance Criteria</dt>
+                <dd>- A clean frame is captured when no robots are present<br>- Background reference is stored for use by the enemy detection pipeline<br>- System prompts the user to clear the arena before capture</dd>
+                <dt>Source</dt>
+                <dd>PRD Section 7.3 — Enemy Detection Strategy (MVP approach)</dd>
+              </div></td>
+            </tr>
+
+            <!-- ============ OUR ROBOT TRACKING (TRK) ============ -->
+
+            <tr class="fr-row" data-category="TRK" data-priority="P0" data-detail="detail-trk-001">
+              <td><span class="chevron"></span></td>
+              <td>FR-TRK-001</td>
+              <td>Detect ArUco tag position from overhead camera</td>
+              <td><span class="badge badge--p0">P0</span></td>
+              <td>PRD 2.2</td>
+            </tr>
+            <tr class="fr-detail" id="detail-trk-001" style="display:none;">
+              <td colspan="5"><div class="fr-detail__inner">
+                <dt>Description</dt>
+                <dd>System shall detect our robot's ArUco tag (ID 5, top surface) from the ceiling-mounted OAK-D Pro camera and determine position (x, y) in arena coordinates using the calibrated homography.</dd>
+                <dt>Acceptance Criteria</dt>
+                <dd>- ArUco ID 5 is reliably detected from 1080p feed at 7ft height<br>- Position is reported in arena coordinates (0-8ft range)<br>- Detection works with 3-inch markers appearing as ~60px</dd>
+                <dt>Source</dt>
+                <dd>PRD Section 2.2 — Robot Tracking; PRD Section 7.2 — ArUco Markers</dd>
+              </div></td>
+            </tr>
+
+            <tr class="fr-row" data-category="TRK" data-priority="P0" data-detail="detail-trk-002">
+              <td><span class="chevron"></span></td>
+              <td>FR-TRK-002</td>
+              <td>Determine robot heading from ArUco tag rotation</td>
+              <td><span class="badge badge--p0">P0</span></td>
+              <td>PRD 2.2</td>
+            </tr>
+            <tr class="fr-detail" id="detail-trk-002" style="display:none;">
+              <td colspan="5"><div class="fr-detail__inner">
+                <dt>Description</dt>
+                <dd>System shall extract heading angle (orientation) from the detected ArUco tag's rotation in the camera image.</dd>
+                <dt>Acceptance Criteria</dt>
+                <dd>- Heading angle is extracted from ArUco marker corners<br>- Heading is reported in degrees or radians relative to arena coordinate system<br>- Accuracy sufficient for strategy engine decision-making</dd>
+                <dt>Source</dt>
+                <dd>PRD Section 2.2 — Robot Tracking</dd>
+              </div></td>
+            </tr>
+
+            <tr class="fr-row" data-category="TRK" data-priority="P0" data-detail="detail-trk-003">
+              <td><span class="chevron"></span></td>
+              <td>FR-TRK-003</td>
+              <td>Handle temporary ArUco occlusion with prediction</td>
+              <td><span class="badge badge--p0">P0</span></td>
+              <td>PRD 2.2</td>
+            </tr>
+            <tr class="fr-detail" id="detail-trk-003" style="display:none;">
+              <td colspan="5"><div class="fr-detail__inner">
+                <dt>Description</dt>
+                <dd>When ArUco detection fails (e.g., robots colliding, dust), the system shall predict/extrapolate position using last known velocity for up to 500ms.</dd>
+                <dt>Acceptance Criteria</dt>
+                <dd>- Position is extrapolated using last known velocity during occlusion<br>- Prediction is maintained for up to 500ms<br>- After 500ms without detection, position is flagged as uncertain<br>- No erratic behavior from a single dropped frame</dd>
+                <dt>Source</dt>
+                <dd>PRD Section 2.2; PRD Section 7.4 — Occlusion Handling</dd>
+              </div></td>
+            </tr>
+
+            <tr class="fr-row" data-category="TRK" data-priority="P0" data-detail="detail-trk-004">
+              <td><span class="chevron"></span></td>
+              <td>FR-TRK-004</td>
+              <td>Bottom ArUco tag as backup for flipped robot</td>
+              <td><span class="badge badge--p0">P0</span></td>
+              <td>PRD 2.2</td>
+            </tr>
+            <tr class="fr-detail" id="detail-trk-004" style="display:none;">
+              <td colspan="5"><div class="fr-detail__inner">
+                <dt>Description</dt>
+                <dd>If our robot flips and the top ArUco tag (ID 5) is not visible, the system shall detect the bottom ArUco tag (ID 6) as a backup.</dd>
+                <dt>Acceptance Criteria</dt>
+                <dd>- ArUco ID 6 is recognized as our robot's bottom marker<br>- Position and heading are derived from ID 6 when ID 5 is not detected<br>- System correctly infers that the robot is flipped</dd>
+                <dt>Source</dt>
+                <dd>PRD Section 2.2 — Robot Tracking; PRD Section 7.2 — Marker IDs</dd>
+              </div></td>
+            </tr>
+
+            <tr class="fr-row" data-category="TRK" data-priority="P0" data-detail="detail-trk-005">
+              <td><span class="chevron"></span></td>
+              <td>FR-TRK-005</td>
+              <td>Complementary filter for camera + IMU fusion (MVP)</td>
+              <td><span class="badge badge--p0">P0</span></td>
+              <td>PRD 7.4</td>
+            </tr>
+            <tr class="fr-detail" id="detail-trk-005" style="display:none;">
+              <td colspan="5"><div class="fr-detail__inner">
+                <dt>Description</dt>
+                <dd>For the MVP, system shall use a complementary filter to fuse camera-based position/heading with IMU gyro data for higher-frequency orientation updates between camera frames.</dd>
+                <dt>Acceptance Criteria</dt>
+                <dd>- High-pass filter on IMU gyro for fast heading changes<br>- Low-pass filter on camera heading for absolute reference<br>- Effective pose update rate of at least 30 Hz</dd>
+                <dt>Source</dt>
+                <dd>PRD Section 2.2; PRD Section 7.4 — State Estimation</dd>
+              </div></td>
+            </tr>
+
+            <tr class="fr-row" data-category="TRK" data-priority="P1" data-detail="detail-trk-006">
+              <td><span class="chevron"></span></td>
+              <td>FR-TRK-006</td>
+              <td>EKF-based sensor fusion for camera + IMU</td>
+              <td><span class="badge badge--p1">P1</span></td>
+              <td>PRD 7.4</td>
+            </tr>
+            <tr class="fr-detail" id="detail-trk-006" style="display:none;">
+              <td colspan="5"><div class="fr-detail__inner">
+                <dt>Description</dt>
+                <dd>Upgrade from complementary filter to Extended Kalman Filter for camera + IMU fusion. State vector: [x, y, vx, vy, heading, omega].</dd>
+                <dt>Acceptance Criteria</dt>
+                <dd>- EKF prediction step uses IMU data at 100-200 Hz<br>- EKF correction step uses camera measurements at 30-60 Hz<br>- State vector includes position, velocity, heading, and angular velocity<br>- Runs in &lt;1ms per update</dd>
+                <dt>Source</dt>
+                <dd>PRD Section 7.4 — State Estimation (Phase 2)</dd>
+              </div></td>
+            </tr>
+
+            <!-- ============ ENEMY TRACKING (ENM) ============ -->
+
+            <tr class="fr-row" data-category="ENM" data-priority="P0" data-detail="detail-enm-001">
+              <td><span class="chevron"></span></td>
+              <td>FR-ENM-001</td>
+              <td>Detect enemy robot via depth thresholding</td>
+              <td><span class="badge badge--p0">P0</span></td>
+              <td>PRD 2.3</td>
+            </tr>
+            <tr class="fr-detail" id="detail-enm-001" style="display:none;">
+              <td colspan="5"><div class="fr-detail__inner">
+                <dt>Description</dt>
+                <dd>System shall detect the enemy robot by thresholding the OAK-D Pro depth map: any object elevated more than 2cm above the floor plane is a candidate robot.</dd>
+                <dt>Acceptance Criteria</dt>
+                <dd>- Depth map from 400P active stereo mode is processed<br>- Floor plane depth is established during calibration<br>- Objects &gt;2cm above floor are identified as candidates<br>- Active stereo IR projector helps with textureless white floor</dd>
+                <dt>Source</dt>
+                <dd>PRD Section 2.3; PRD Section 7.3 — Enemy Detection Strategy</dd>
+              </div></td>
+            </tr>
+
+            <tr class="fr-row" data-category="ENM" data-priority="P0" data-detail="detail-enm-002">
+              <td><span class="chevron"></span></td>
+              <td>FR-ENM-002</td>
+              <td>Detect enemy robot via reference frame differencing</td>
+              <td><span class="badge badge--p0">P0</span></td>
+              <td>PRD 7.3</td>
+            </tr>
+            <tr class="fr-detail" id="detail-enm-002" style="display:none;">
+              <td colspan="5"><div class="fr-detail__inner">
+                <dt>Description</dt>
+                <dd>System shall detect the enemy by comparing live frames against the clean background reference captured during calibration (frame differencing).</dd>
+                <dt>Acceptance Criteria</dt>
+                <dd>- Live frames are differenced against calibration background reference<br>- Moving objects are identified from significant pixel differences<br>- Logo area is masked to prevent false positives<br>- Shadows are handled (via MOG2 shadow detection or depth verification)</dd>
+                <dt>Source</dt>
+                <dd>PRD Section 7.3 — Enemy Detection Strategy (MVP)</dd>
+              </div></td>
+            </tr>
+
+            <tr class="fr-row" data-category="ENM" data-priority="P0" data-detail="detail-enm-003">
+              <td><span class="chevron"></span></td>
+              <td>FR-ENM-003</td>
+              <td>Disambiguate enemy from our robot using known position</td>
+              <td><span class="badge badge--p0">P0</span></td>
+              <td>PRD 2.3</td>
+            </tr>
+            <tr class="fr-detail" id="detail-enm-003" style="display:none;">
+              <td colspan="5"><div class="fr-detail__inner">
+                <dt>Description</dt>
+                <dd>When multiple objects are detected, the system shall exclude our robot's known position/footprint to isolate the enemy. The largest remaining contour is identified as the enemy.</dd>
+                <dt>Acceptance Criteria</dt>
+                <dd>- Our robot's known position is masked from candidate detections<br>- Exclusion zone is sized appropriately for the robot footprint<br>- Largest remaining contour is classified as the enemy<br>- Works when robots are adjacent or overlapping</dd>
+                <dt>Source</dt>
+                <dd>PRD Section 2.3 — Enemy Robot Tracking</dd>
+              </div></td>
+            </tr>
+
+            <tr class="fr-row" data-category="ENM" data-priority="P0" data-detail="detail-enm-004">
+              <td><span class="chevron"></span></td>
+              <td>FR-ENM-004</td>
+              <td>Track enemy position and estimate heading from motion vector</td>
+              <td><span class="badge badge--p0">P0</span></td>
+              <td>PRD 2.3</td>
+            </tr>
+            <tr class="fr-detail" id="detail-enm-004" style="display:none;">
+              <td colspan="5"><div class="fr-detail__inner">
+                <dt>Description</dt>
+                <dd>System shall track the enemy position (x, y) in arena coordinates and estimate its heading from the velocity vector direction over recent frames.</dd>
+                <dt>Acceptance Criteria</dt>
+                <dd>- Enemy position is reported in arena coordinates<br>- Heading is estimated from the direction of motion<br>- Velocity and acceleration are estimated for strategic prediction<br>- Works with varying robot shapes and colors</dd>
+                <dt>Source</dt>
+                <dd>PRD Section 2.3 — Enemy Robot Tracking</dd>
+              </div></td>
+            </tr>
+
+            <tr class="fr-row" data-category="ENM" data-priority="P1" data-detail="detail-enm-005">
+              <td><span class="chevron"></span></td>
+              <td>FR-ENM-005</td>
+              <td>Kalman filter tracking for enemy position smoothing</td>
+              <td><span class="badge badge--p1">P1</span></td>
+              <td>PRD 7.3</td>
+            </tr>
+            <tr class="fr-detail" id="detail-enm-005" style="display:none;">
+              <td colspan="5"><div class="fr-detail__inner">
+                <dt>Description</dt>
+                <dd>Add Kalman filter on enemy centroid position [x, y, vx, vy] to smooth noisy detections, predict through brief occlusions, and provide velocity estimates.</dd>
+                <dt>Acceptance Criteria</dt>
+                <dd>- Kalman filter state: [x, y, vx, vy]<br>- Smooths frame-to-frame jitter in detection<br>- Predicts through brief occlusions (&lt;500ms)<br>- Provides velocity estimate to strategy engine</dd>
+                <dt>Source</dt>
+                <dd>PRD Section 7.3 — Enemy Detection (Phase 2); PRD Section 7.4 — Enemy Tracking</dd>
+              </div></td>
+            </tr>
+
+            <tr class="fr-row" data-category="ENM" data-priority="P2" data-detail="detail-enm-006">
+              <td><span class="chevron"></span></td>
+              <td>FR-ENM-006</td>
+              <td>On-device neural network enemy detector</td>
+              <td><span class="badge badge--p2">P2</span></td>
+              <td>PRD 7.3</td>
+            </tr>
+            <tr class="fr-detail" id="detail-enm-006" style="display:none;">
+              <td colspan="5"><div class="fr-detail__inner">
+                <dt>Description</dt>
+                <dd>Train a custom object detector (MobileNet-SSD or YOLOv5-nano) on combat robot images and deploy to the OAK-D Pro Myriad X VPU for on-device enemy detection at ~30 FPS.</dd>
+                <dt>Acceptance Criteria</dt>
+                <dd>- Custom model trained on combat robot images<br>- Model deployed to Myriad X VPU via OpenVINO<br>- Runs at 30+ FPS with minimal host CPU impact<br>- Detects various robot shapes and colors</dd>
+                <dt>Source</dt>
+                <dd>PRD Section 7.3 — Enemy Detection (Phase 3)</dd>
+              </div></td>
+            </tr>
+
+            <!-- ============ STRATEGY ENGINE (STR) ============ -->
+
+            <tr class="fr-row" data-category="STR" data-priority="P0" data-detail="detail-str-001">
+              <td><span class="chevron"></span></td>
+              <td>FR-STR-001</td>
+              <td>Basic pursuit behavior: drive toward enemy</td>
+              <td><span class="badge badge--p0">P0</span></td>
+              <td>PRD 2.4</td>
+            </tr>
+            <tr class="fr-detail" id="detail-str-001" style="display:none;">
+              <td colspan="5"><div class="fr-detail__inner">
+                <dt>Description</dt>
+                <dd>The strategy engine shall implement a Pursue behavior that closes distance to the enemy robot by computing motor commands to drive toward the enemy's current position.</dd>
+                <dt>Acceptance Criteria</dt>
+                <dd>- Robot drives toward enemy's detected position<br>- Motor commands are appropriate differential drive values<br>- Heading correction applied to maintain approach vector</dd>
+                <dt>Source</dt>
+                <dd>PRD Section 2.4 — Strategy Engine (Pursue behavior)</dd>
+              </div></td>
+            </tr>
+
+            <tr class="fr-row" data-category="STR" data-priority="P0" data-detail="detail-str-002">
+              <td><span class="chevron"></span></td>
+              <td>FR-STR-002</td>
+              <td>Push behavior: drive enemy toward the pit</td>
+              <td><span class="badge badge--p0">P0</span></td>
+              <td>PRD 2.4</td>
+            </tr>
+            <tr class="fr-detail" id="detail-str-002" style="display:none;">
+              <td colspan="5"><div class="fr-detail__inner">
+                <dt>Description</dt>
+                <dd>The strategy engine shall implement a Push behavior that drives into the enemy to push it toward the pit corner, using the pit location from calibration.</dd>
+                <dt>Acceptance Criteria</dt>
+                <dd>- Push direction computed based on enemy position relative to pit<br>- Robot applies sustained force toward pit<br>- Behavior activates when in contact range with enemy</dd>
+                <dt>Source</dt>
+                <dd>PRD Section 2.4 — Strategy Engine (Push behavior)</dd>
+              </div></td>
+            </tr>
+
+            <tr class="fr-row" data-category="STR" data-priority="P0" data-detail="detail-str-003">
+              <td><span class="chevron"></span></td>
+              <td>FR-STR-003</td>
+              <td>Pit avoidance: never drive our robot into the pit</td>
+              <td><span class="badge badge--p0">P0</span></td>
+              <td>PRD 2.4</td>
+            </tr>
+            <tr class="fr-detail" id="detail-str-003" style="display:none;">
+              <td colspan="5"><div class="fr-detail__inner">
+                <dt>Description</dt>
+                <dd>The strategy engine shall always prevent our robot from driving into the pit. This is a hard constraint that overrides all other behaviors.</dd>
+                <dt>Acceptance Criteria</dt>
+                <dd>- Pit zone boundary is checked before any motor command<br>- If commanded path would enter the pit zone, override with safe trajectory<br>- No scenario causes our robot to self-eliminate</dd>
+                <dt>Source</dt>
+                <dd>PRD Section 2.4 — Strategy Engine (Avoid pit)</dd>
+              </div></td>
+            </tr>
+
+            <tr class="fr-row" data-category="STR" data-priority="P0" data-detail="detail-str-004">
+              <td><span class="chevron"></span></td>
+              <td>FR-STR-004</td>
+              <td>Strategy decisions at 10+ Hz</td>
+              <td><span class="badge badge--p0">P0</span></td>
+              <td>PRD 2.4</td>
+            </tr>
+            <tr class="fr-detail" id="detail-str-004" style="display:none;">
+              <td colspan="5"><div class="fr-detail__inner">
+                <dt>Description</dt>
+                <dd>The strategy engine shall produce motor command decisions at a rate of at least 10 Hz to maintain responsive behavior.</dd>
+                <dt>Acceptance Criteria</dt>
+                <dd>- Strategy loop runs at 10 Hz or faster<br>- Motor commands are updated every 100ms or less<br>- No decision cycle takes more than 100ms</dd>
+                <dt>Source</dt>
+                <dd>PRD Section 2.4 — Strategy Engine</dd>
+              </div></td>
+            </tr>
+
+            <tr class="fr-row" data-category="STR" data-priority="P1" data-detail="detail-str-005">
+              <td><span class="chevron"></span></td>
+              <td>FR-STR-005</td>
+              <td>Position behavior: maneuver behind enemy relative to pit</td>
+              <td><span class="badge badge--p1">P1</span></td>
+              <td>PRD 2.4</td>
+            </tr>
+            <tr class="fr-detail" id="detail-str-005" style="display:none;">
+              <td colspan="5"><div class="fr-detail__inner">
+                <dt>Description</dt>
+                <dd>Implement a Position behavior that maneuvers our robot to get behind or beside the enemy relative to the pit, enabling more effective pushes.</dd>
+                <dt>Acceptance Criteria</dt>
+                <dd>- Robot navigates to a position behind the enemy (opposite side from pit)<br>- Approach angle is optimized for push effectiveness<br>- Transition to Push behavior occurs when positioned correctly</dd>
+                <dt>Source</dt>
+                <dd>PRD Section 2.4 — Strategy Engine (Position behavior)</dd>
+              </div></td>
+            </tr>
+
+            <tr class="fr-row" data-category="STR" data-priority="P1" data-detail="detail-str-006">
+              <td><span class="chevron"></span></td>
+              <td>FR-STR-006</td>
+              <td>Retreat behavior: disengage from disadvantageous position</td>
+              <td><span class="badge badge--p1">P1</span></td>
+              <td>PRD 2.4</td>
+            </tr>
+            <tr class="fr-detail" id="detail-str-006" style="display:none;">
+              <td colspan="5"><div class="fr-detail__inner">
+                <dt>Description</dt>
+                <dd>Implement a Retreat behavior that backs the robot away when in a disadvantageous position (e.g., being pushed toward our own pit, pinned).</dd>
+                <dt>Acceptance Criteria</dt>
+                <dd>- Robot detects disadvantageous position (near pit, facing wrong direction)<br>- Retreat moves robot to a safer position<br>- Configurable retreat thresholds via dashboard</dd>
+                <dt>Source</dt>
+                <dd>PRD Section 2.4 — Strategy Engine (Retreat behavior)</dd>
+              </div></td>
+            </tr>
+
+            <tr class="fr-row" data-category="STR" data-priority="P1" data-detail="detail-str-007">
+              <td><span class="chevron"></span></td>
+              <td>FR-STR-007</td>
+              <td>Configurable strategy parameters via web dashboard</td>
+              <td><span class="badge badge--p1">P1</span></td>
+              <td>PRD 2.4</td>
+            </tr>
+            <tr class="fr-detail" id="detail-str-007" style="display:none;">
+              <td colspan="5"><div class="fr-detail__inner">
+                <dt>Description</dt>
+                <dd>Strategy parameters (aggression level, preferred approach angle, retreat thresholds, speed limits) shall be adjustable through the web dashboard with presets available.</dd>
+                <dt>Acceptance Criteria</dt>
+                <dd>- Aggression level slider adjusts pursuit/retreat balance<br>- Approach angle is configurable<br>- Speed limits can be set<br>- Strategy presets can be selected<br>- Changes take effect in real-time</dd>
+                <dt>Source</dt>
+                <dd>PRD Section 2.4 &amp; 2.6 — Strategy Configuration</dd>
+              </div></td>
+            </tr>
+
+            <tr class="fr-row" data-category="STR" data-priority="P1" data-detail="detail-str-008">
+              <td><span class="chevron"></span></td>
+              <td>FR-STR-008</td>
+              <td>Behavior tree or state machine architecture</td>
+              <td><span class="badge badge--p1">P1</span></td>
+              <td>PRD 2.4</td>
+            </tr>
+            <tr class="fr-detail" id="detail-str-008" style="display:none;">
+              <td colspan="5"><div class="fr-detail__inner">
+                <dt>Description</dt>
+                <dd>The full strategy engine shall use a behavior tree or state machine architecture for clear, debuggable strategy logic with well-defined state transitions.</dd>
+                <dt>Acceptance Criteria</dt>
+                <dd>- Strategy states are clearly defined (Pursue, Position, Push, Retreat, Avoid)<br>- State transitions are deterministic and logged<br>- Current state is visible on the dashboard<br>- Specific behaviors can be enabled/disabled</dd>
+                <dt>Source</dt>
+                <dd>PRD Section 2.4 — Strategy Engine</dd>
+              </div></td>
+            </tr>
+
+            <tr class="fr-row" data-category="STR" data-priority="P2" data-detail="detail-str-009">
+              <td><span class="chevron"></span></td>
+              <td>FR-STR-009</td>
+              <td>ML-based enemy behavior prediction</td>
+              <td><span class="badge badge--p2">P2</span></td>
+              <td>PRD 5</td>
+            </tr>
+            <tr class="fr-detail" id="detail-str-009" style="display:none;">
+              <td colspan="5"><div class="fr-detail__inner">
+                <dt>Description</dt>
+                <dd>Machine learning model to predict enemy behavior and movement patterns, enabling proactive strategy rather than reactive.</dd>
+                <dt>Acceptance Criteria</dt>
+                <dd>- Model trained on recorded match data<br>- Predicts enemy movement 0.5-1 second ahead<br>- Predictions feed into strategy engine decision-making<br>- Automated strategy tuning from recorded matches</dd>
+                <dt>Source</dt>
+                <dd>PRD Section 5 — Phase 3 Additions</dd>
+              </div></td>
+            </tr>
+
+            <!-- ============ ESP32 COMMS (COM) ============ -->
+
+            <tr class="fr-row" data-category="COM" data-priority="P0" data-detail="detail-com-001">
+              <td><span class="chevron"></span></td>
+              <td>FR-COM-001</td>
+              <td>WiFi UDP motor command transmission</td>
+              <td><span class="badge badge--p0">P0</span></td>
+              <td>PRD 2.5</td>
+            </tr>
+            <tr class="fr-detail" id="detail-com-001" style="display:none;">
+              <td colspan="5"><div class="fr-detail__inner">
+                <dt>Description</dt>
+                <dd>System shall transmit motor commands to the ESP32 over WiFi UDP using a binary struct packet format (8 bytes: cmd_type, sequence, left_speed, right_speed, checksum).</dd>
+                <dt>Acceptance Criteria</dt>
+                <dd>- Motor commands sent via UDP to ESP32<br>- Binary packet format with checksum validation<br>- Differential drive commands: left_speed and right_speed<br>- Commands sent at 50 Hz</dd>
+                <dt>Source</dt>
+                <dd>PRD Section 2.5; PRD Section 7.5 — Communication Protocol</dd>
+              </div></td>
+            </tr>
+
+            <tr class="fr-row" data-category="COM" data-priority="P0" data-detail="detail-com-002">
+              <td><span class="chevron"></span></td>
+              <td>FR-COM-002</td>
+              <td>Motor command latency under 20ms RTT</td>
+              <td><span class="badge badge--p0">P0</span></td>
+              <td>PRD 2.5</td>
+            </tr>
+            <tr class="fr-detail" id="detail-com-002" style="display:none;">
+              <td colspan="5"><div class="fr-detail__inner">
+                <dt>Description</dt>
+                <dd>Round-trip latency for motor commands shall be under 20ms under normal conditions.</dd>
+                <dt>Acceptance Criteria</dt>
+                <dd>- Median RTT &lt;20ms measured under arena conditions<br>- WiFi power saving disabled on ESP32<br>- Dedicated WiFi AP used (not shared)<br>- Nagle's algorithm disabled</dd>
+                <dt>Source</dt>
+                <dd>PRD Section 2.5; PRD Section 7.5 — Communication Protocol</dd>
+              </div></td>
+            </tr>
+
+            <tr class="fr-row" data-category="COM" data-priority="P0" data-detail="detail-com-003">
+              <td><span class="chevron"></span></td>
+              <td>FR-COM-003</td>
+              <td>Emergency stop command</td>
+              <td><span class="badge badge--p0">P0</span></td>
+              <td>PRD 2.5</td>
+            </tr>
+            <tr class="fr-detail" id="detail-com-003" style="display:none;">
+              <td colspan="5"><div class="fr-detail__inner">
+                <dt>Description</dt>
+                <dd>System shall support an emergency stop command that immediately halts all motors on the ESP32.</dd>
+                <dt>Acceptance Criteria</dt>
+                <dd>- Emergency stop command type defined in protocol<br>- ESP32 immediately sets all motor speeds to zero on receipt<br>- Emergency stop can be triggered from web dashboard</dd>
+                <dt>Source</dt>
+                <dd>PRD Section 2.5 — ESP32 Communication</dd>
+              </div></td>
+            </tr>
+
+            <tr class="fr-row" data-category="COM" data-priority="P0" data-detail="detail-com-004">
+              <td><span class="chevron"></span></td>
+              <td>FR-COM-004</td>
+              <td>200ms communication failsafe timeout</td>
+              <td><span class="badge badge--p0">P0</span></td>
+              <td>PRD 2.5</td>
+            </tr>
+            <tr class="fr-detail" id="detail-com-004" style="display:none;">
+              <td colspan="5"><div class="fr-detail__inner">
+                <dt>Description</dt>
+                <dd>ESP32 firmware shall stop all motors if no valid motor command is received within 200ms (watchdog failsafe).</dd>
+                <dt>Acceptance Criteria</dt>
+                <dd>- ESP32 implements 200ms watchdog timer<br>- Both motors set to zero speed on timeout<br>- Timer resets on each valid command received<br>- Failsafe activates within 200ms of last valid command</dd>
+                <dt>Source</dt>
+                <dd>PRD Section 2.5; PRD Section 7.5 — Failsafe</dd>
+              </div></td>
+            </tr>
+
+            <tr class="fr-row" data-category="COM" data-priority="P0" data-detail="detail-com-005">
+              <td><span class="chevron"></span></td>
+              <td>FR-COM-005</td>
+              <td>IMU telemetry stream from ESP32 at 100+ Hz</td>
+              <td><span class="badge badge--p0">P0</span></td>
+              <td>PRD 2.5</td>
+            </tr>
+            <tr class="fr-detail" id="detail-com-005" style="display:none;">
+              <td colspan="5"><div class="fr-detail__inner">
+                <dt>Description</dt>
+                <dd>ESP32 shall stream IMU telemetry (gyro, accelerometer) to the PC over WiFi UDP at 100 Hz or higher, along with battery voltage and heartbeat.</dd>
+                <dt>Acceptance Criteria</dt>
+                <dd>- IMU data transmitted at 100+ Hz on separate UDP port<br>- Packet includes gyro (3-axis), accelerometer (3-axis), heading, battery voltage<br>- Binary struct format with sequence number and checksum<br>- Connection health monitored via heartbeat</dd>
+                <dt>Source</dt>
+                <dd>PRD Section 2.5; PRD Section 7.5 — Communication Protocol</dd>
+              </div></td>
+            </tr>
+
+            <tr class="fr-row" data-category="COM" data-priority="P0" data-detail="detail-com-006">
+              <td><span class="chevron"></span></td>
+              <td>FR-COM-006</td>
+              <td>Auto-reconnect on WiFi dropout</td>
+              <td><span class="badge badge--p0">P0</span></td>
+              <td>PRD 2.5</td>
+            </tr>
+            <tr class="fr-detail" id="detail-com-006" style="display:none;">
+              <td colspan="5"><div class="fr-detail__inner">
+                <dt>Description</dt>
+                <dd>System shall automatically attempt to reconnect to the ESP32 on WiFi dropout without requiring manual intervention.</dd>
+                <dt>Acceptance Criteria</dt>
+                <dd>- Connection loss is detected within 500ms<br>- Automatic reconnection attempts begin immediately<br>- System resumes normal operation once connection is restored<br>- Dashboard displays connection status during dropout</dd>
+                <dt>Source</dt>
+                <dd>PRD Section 2.5 — ESP32 Communication</dd>
+              </div></td>
+            </tr>
+
+            <!-- ============ WEB DASHBOARD (WEB) ============ -->
+
+            <tr class="fr-row" data-category="WEB" data-priority="P0" data-detail="detail-web-001">
+              <td><span class="chevron"></span></td>
+              <td>FR-WEB-001</td>
+              <td>Real-time top-down arena visualization</td>
+              <td><span class="badge badge--p0">P0</span></td>
+              <td>PRD 2.6</td>
+            </tr>
+            <tr class="fr-detail" id="detail-web-001" style="display:none;">
+              <td colspan="5"><div class="fr-detail__inner">
+                <dt>Description</dt>
+                <dd>The web dashboard shall display a real-time top-down arena view showing arena boundaries, pit location, both robot positions with heading indicators and motion trails, and current strategy state.</dd>
+                <dt>Acceptance Criteria</dt>
+                <dd>- Arena boundaries and pit rendered to scale<br>- Our robot shown with position, heading arrow, and trail<br>- Enemy robot shown with position, estimated heading, and trail<br>- Current strategy state displayed (pursue/position/push/retreat)<br>- Updates at 10+ FPS via WebSocket</dd>
+                <dt>Source</dt>
+                <dd>PRD Section 2.6 — Live View</dd>
+              </div></td>
+            </tr>
+
+            <tr class="fr-row" data-category="WEB" data-priority="P0" data-detail="detail-web-002">
+              <td><span class="chevron"></span></td>
+              <td>FR-WEB-002</td>
+              <td>Manual motor control override (virtual joystick)</td>
+              <td><span class="badge badge--p0">P0</span></td>
+              <td>PRD 2.6</td>
+            </tr>
+            <tr class="fr-detail" id="detail-web-002" style="display:none;">
+              <td colspan="5"><div class="fr-detail__inner">
+                <dt>Description</dt>
+                <dd>The dashboard shall provide a virtual joystick or WASD-based manual motor control that overrides autonomous mode for testing and debugging.</dd>
+                <dt>Acceptance Criteria</dt>
+                <dd>- Virtual joystick or WASD keys send motor commands directly<br>- Autonomous mode is suspended during manual control<br>- Smooth control with responsive feel<br>- Clear indication that manual override is active</dd>
+                <dt>Source</dt>
+                <dd>PRD Section 2.6 — Testing &amp; Debug</dd>
+              </div></td>
+            </tr>
+
+            <tr class="fr-row" data-category="WEB" data-priority="P0" data-detail="detail-web-003">
+              <td><span class="chevron"></span></td>
+              <td>FR-WEB-003</td>
+              <td>Connection status display (ESP32 and camera)</td>
+              <td><span class="badge badge--p0">P0</span></td>
+              <td>PRD 2.6</td>
+            </tr>
+            <tr class="fr-detail" id="detail-web-003" style="display:none;">
+              <td colspan="5"><div class="fr-detail__inner">
+                <dt>Description</dt>
+                <dd>The dashboard shall display the connection state of both the ESP32 (WiFi) and the OAK-D Pro camera, including signal strength and system resource usage.</dd>
+                <dt>Acceptance Criteria</dt>
+                <dd>- ESP32 connection status (connected/disconnected) displayed<br>- Camera connection status displayed<br>- FPS and latency indicators shown<br>- System resources (CPU, memory) displayed</dd>
+                <dt>Source</dt>
+                <dd>PRD Section 2.6 — Connection Status</dd>
+              </div></td>
+            </tr>
+
+            <tr class="fr-row" data-category="WEB" data-priority="P0" data-detail="detail-web-004">
+              <td><span class="chevron"></span></td>
+              <td>FR-WEB-004</td>
+              <td>Calibration wizard UI</td>
+              <td><span class="badge badge--p0">P0</span></td>
+              <td>PRD 2.6</td>
+            </tr>
+            <tr class="fr-detail" id="detail-web-004" style="display:none;">
+              <td colspan="5"><div class="fr-detail__inner">
+                <dt>Description</dt>
+                <dd>The dashboard shall provide a guided calibration wizard that walks the user through the 4-corner ArUco placement process with visual feedback.</dd>
+                <dt>Acceptance Criteria</dt>
+                <dd>- Step-by-step wizard for corner placement<br>- Visual feedback for each detected corner<br>- Pit marker detection step included<br>- Background reference capture step included<br>- Completion confirmation with validation</dd>
+                <dt>Source</dt>
+                <dd>PRD Section 2.6 — Calibration</dd>
+              </div></td>
+            </tr>
+
+            <tr class="fr-row" data-category="WEB" data-priority="P1" data-detail="detail-web-005">
+              <td><span class="chevron"></span></td>
+              <td>FR-WEB-005</td>
+              <td>Strategy configuration UI with presets</td>
+              <td><span class="badge badge--p1">P1</span></td>
+              <td>PRD 2.6</td>
+            </tr>
+            <tr class="fr-detail" id="detail-web-005" style="display:none;">
+              <td colspan="5"><div class="fr-detail__inner">
+                <dt>Description</dt>
+                <dd>The dashboard shall provide a strategy configuration page with sliders for aggression, approach angles, retreat thresholds, speed limits, and strategy presets.</dd>
+                <dt>Acceptance Criteria</dt>
+                <dd>- Adjustable sliders for all strategy parameters<br>- Strategy presets selectable<br>- Behavior enable/disable toggles<br>- Strategy decision boundaries visualized on arena map<br>- Changes apply in real-time</dd>
+                <dt>Source</dt>
+                <dd>PRD Section 2.6 — Strategy Configuration</dd>
+              </div></td>
+            </tr>
+
+            <tr class="fr-row" data-category="WEB" data-priority="P1" data-detail="detail-web-006">
+              <td><span class="chevron"></span></td>
+              <td>FR-WEB-006</td>
+              <td>Debug tools: sensor data, detection overlays, log viewer</td>
+              <td><span class="badge badge--p1">P1</span></td>
+              <td>PRD 2.6</td>
+            </tr>
+            <tr class="fr-detail" id="detail-web-006" style="display:none;">
+              <td colspan="5"><div class="fr-detail__inner">
+                <dt>Description</dt>
+                <dd>The dashboard shall provide debug tools: raw sensor data display, ArUco detection visualization, enemy detection overlays, latency/timing graphs, and a filterable log viewer.</dd>
+                <dt>Acceptance Criteria</dt>
+                <dd>- Raw IMU values displayed in real-time<br>- ArUco markers shown with IDs and poses<br>- Enemy detection contours and bounding boxes overlaid<br>- Latency and timing graphs rendered<br>- Log viewer with level and source filtering</dd>
+                <dt>Source</dt>
+                <dd>PRD Section 2.6 — Testing &amp; Debug</dd>
+              </div></td>
+            </tr>
+
+            <tr class="fr-row" data-category="WEB" data-priority="P1" data-detail="detail-web-007">
+              <td><span class="chevron"></span></td>
+              <td>FR-WEB-007</td>
+              <td>Match recording and playback</td>
+              <td><span class="badge badge--p1">P1</span></td>
+              <td>PRD 5</td>
+            </tr>
+            <tr class="fr-detail" id="detail-web-007" style="display:none;">
+              <td colspan="5"><div class="fr-detail__inner">
+                <dt>Description</dt>
+                <dd>The system shall support recording match data (robot positions, strategy states, sensor data) and playing it back on the dashboard for analysis.</dd>
+                <dt>Acceptance Criteria</dt>
+                <dd>- All telemetry data can be recorded during a match<br>- Recordings are saved with timestamps<br>- Playback on the dashboard with timeline scrubbing<br>- Arena visualization replays the match</dd>
+                <dt>Source</dt>
+                <dd>PRD Section 5 — Phase 2 Additions; PRD Section 2.6 — Testing &amp; Debug</dd>
+              </div></td>
+            </tr>
+
+            <!-- ============ PERFORMANCE (PRF) ============ -->
+
+            <tr class="fr-row" data-category="PRF" data-priority="P0" data-detail="detail-prf-001">
+              <td><span class="chevron"></span></td>
+              <td>FR-PRF-001</td>
+              <td>Vision pipeline at 30+ FPS (target 60 FPS)</td>
+              <td><span class="badge badge--p0">P0</span></td>
+              <td>PRD 3</td>
+            </tr>
+            <tr class="fr-detail" id="detail-prf-001" style="display:none;">
+              <td colspan="5"><div class="fr-detail__inner">
+                <dt>Description</dt>
+                <dd>The vision pipeline (camera capture, ArUco detection, enemy detection, coordinate transform) shall process at a minimum of 30 FPS, with a target of 60 FPS at 1080p.</dd>
+                <dt>Acceptance Criteria</dt>
+                <dd>- Pipeline processes at least 30 frames per second sustained<br>- At 1080p resolution with all detections active<br>- FPS is monitored and displayed on dashboard</dd>
+                <dt>Source</dt>
+                <dd>PRD Section 3 — Performance; PRD Section 7.1 — Camera Selection</dd>
+              </div></td>
+            </tr>
+
+            <tr class="fr-row" data-category="PRF" data-priority="P0" data-detail="detail-prf-002">
+              <td><span class="chevron"></span></td>
+              <td>FR-PRF-002</td>
+              <td>End-to-end latency under 50ms</td>
+              <td><span class="badge badge--p0">P0</span></td>
+              <td>PRD 3</td>
+            </tr>
+            <tr class="fr-detail" id="detail-prf-002" style="display:none;">
+              <td colspan="5"><div class="fr-detail__inner">
+                <dt>Description</dt>
+                <dd>Total latency from camera frame capture to motor command sent shall be under 50ms.</dd>
+                <dt>Acceptance Criteria</dt>
+                <dd>- Camera-to-host latency: ~5-10ms (1080p USB3)<br>- Vision processing: ~15-30ms<br>- Strategy decision: &lt;5ms<br>- Network transmission: ~5-15ms RTT<br>- Total &lt;50ms measured end-to-end</dd>
+                <dt>Source</dt>
+                <dd>PRD Section 3 — Performance</dd>
+              </div></td>
+            </tr>
+
+            <tr class="fr-row" data-category="PRF" data-priority="P0" data-detail="detail-prf-003">
+              <td><span class="chevron"></span></td>
+              <td>FR-PRF-003</td>
+              <td>Dashboard updates at 10+ FPS</td>
+              <td><span class="badge badge--p0">P0</span></td>
+              <td>PRD 3</td>
+            </tr>
+            <tr class="fr-detail" id="detail-prf-003" style="display:none;">
+              <td colspan="5"><div class="fr-detail__inner">
+                <dt>Description</dt>
+                <dd>The web dashboard live visualization shall update at 10 FPS or higher via WebSocket.</dd>
+                <dt>Acceptance Criteria</dt>
+                <dd>- Arena visualization updates at 10+ FPS<br>- WebSocket delivers telemetry data efficiently<br>- No visible stutter in live view</dd>
+                <dt>Source</dt>
+                <dd>PRD Section 3 — Performance</dd>
+              </div></td>
+            </tr>
+
+            <tr class="fr-row" data-category="PRF" data-priority="P0" data-detail="detail-prf-004">
+              <td><span class="chevron"></span></td>
+              <td>FR-PRF-004</td>
+              <td>Failsafe activation within 200ms of critical failure</td>
+              <td><span class="badge badge--p0">P0</span></td>
+              <td>PRD 3</td>
+            </tr>
+            <tr class="fr-detail" id="detail-prf-004" style="display:none;">
+              <td colspan="5"><div class="fr-detail__inner">
+                <dt>Description</dt>
+                <dd>Failsafe behaviors (motor stop) shall activate within 200ms of any critical failure: camera frame drops, WiFi interruptions, or ArUco detection failures.</dd>
+                <dt>Acceptance Criteria</dt>
+                <dd>- Camera failure detected within 200ms<br>- WiFi loss triggers motor stop within 200ms<br>- Graceful degradation on ArUco failure (prediction, not immediate stop)<br>- No single dropped frame causes erratic behavior</dd>
+                <dt>Source</dt>
+                <dd>PRD Section 3 — Reliability</dd>
+              </div></td>
+            </tr>
+
+            <tr class="fr-row" data-category="PRF" data-priority="P0" data-detail="detail-prf-005">
+              <td><span class="chevron"></span></td>
+              <td>FR-PRF-005</td>
+              <td>Calibration completable in under 60 seconds</td>
+              <td><span class="badge badge--p0">P0</span></td>
+              <td>PRD 3</td>
+            </tr>
+            <tr class="fr-detail" id="detail-prf-005" style="display:none;">
+              <td colspan="5"><div class="fr-detail__inner">
+                <dt>Description</dt>
+                <dd>The full calibration process (4 corners + pit + background reference) shall be completable in under 60 seconds by an operator.</dd>
+                <dt>Acceptance Criteria</dt>
+                <dd>- End-to-end calibration flow takes &lt;60 seconds<br>- Clear, minimal prompts guide the operator<br>- Marker detection is fast and responsive<br>- No unnecessary delays between steps</dd>
+                <dt>Source</dt>
+                <dd>PRD Section 3 — Usability</dd>
+              </div></td>
+            </tr>
+
+            <tr class="fr-row" data-category="PRF" data-priority="P0" data-detail="detail-prf-006">
+              <td><span class="chevron"></span></td>
+              <td>FR-PRF-006</td>
+              <td>Camera exposure set to 400-500 microseconds for motion freeze</td>
+              <td><span class="badge badge--p0">P0</span></td>
+              <td>PRD 7.1</td>
+            </tr>
+            <tr class="fr-detail" id="detail-prf-006" style="display:none;">
+              <td colspan="5"><div class="fr-detail__inner">
+                <dt>Description</dt>
+                <dd>Camera manual exposure shall be set to 400-500 microseconds to freeze robot motion at up to 8 ft/s to less than 1 pixel of blur.</dd>
+                <dt>Acceptance Criteria</dt>
+                <dd>- OAK-D Pro configured for manual exposure at 400-500us<br>- Motion blur is &lt;1 pixel at 8 ft/s robot speed<br>- ISO increased to compensate for reduced light<br>- Image quality sufficient for ArUco detection</dd>
+                <dt>Source</dt>
+                <dd>PRD Section 7.1 — Camera Selection; PRD Section 6C — Motion Blur Mitigation</dd>
+              </div></td>
+            </tr>
+
+            <tr class="fr-row" data-category="PRF" data-priority="P2" data-detail="detail-prf-007">
+              <td><span class="chevron"></span></td>
+              <td>FR-PRF-007</td>
+              <td>Multi-camera support for redundancy</td>
+              <td><span class="badge badge--p2">P2</span></td>
+              <td>PRD 5</td>
+            </tr>
+            <tr class="fr-detail" id="detail-prf-007" style="display:none;">
+              <td colspan="5"><div class="fr-detail__inner">
+                <dt>Description</dt>
+                <dd>System shall support multiple overhead cameras for redundancy, providing continued tracking if one camera fails or has a blind spot.</dd>
+                <dt>Acceptance Criteria</dt>
+                <dd>- Multiple OAK-D Pro cameras can be connected simultaneously<br>- Calibration supports multiple camera viewpoints<br>- System degrades gracefully if one camera fails<br>- Combined FOV covers the full arena</dd>
+                <dt>Source</dt>
+                <dd>PRD Section 5 — Phase 3 Additions</dd>
+              </div></td>
+            </tr>
+
+          </tbody>
+        </table>
+      </div>
+    </div>
+
+    <!-- Summary Stats -->
+    <div class="grid grid--4 mt-6">
+      <div class="metric-card">
+        <div class="metric-card__value">42</div>
+        <div class="metric-card__label">Total Requirements</div>
+      </div>
+      <div class="metric-card" style="border-top: 3px solid #c5221f;">
+        <div class="metric-card__value" style="color:#c5221f;">27</div>
+        <div class="metric-card__label">P0 — MVP</div>
+      </div>
+      <div class="metric-card" style="border-top: 3px solid #b8860b;">
+        <div class="metric-card__value" style="color:#b8860b;">12</div>
+        <div class="metric-card__label">P1 — Phase 2</div>
+      </div>
+      <div class="metric-card" style="border-top: 3px solid #1a73e8;">
+        <div class="metric-card__value" style="color:#1a73e8;">3</div>
+        <div class="metric-card__label">P2 — Phase 3</div>
+      </div>
+    </div>
+
+  </div><!-- /content -->
+</div><!-- /main -->
+
+<script src="js/dashboard.js"></script>
+</body>
+</html>

@@ -1,0 +1,727 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>PRD &amp; Architecture — Brick for Brains</title>
+  <link rel="stylesheet" href="css/styles.css">
+</head>
+<body>
+
+<!-- Sidebar -->
+<aside class="sidebar">
+  <div class="sidebar__brand">
+    <h1>Brick for Brains</h1>
+    <div class="subtitle">Autonomous Control System</div>
+  </div>
+  <nav class="sidebar__nav">
+    <div class="nav-section">Dashboard</div>
+    <a href="index.html">Executive Summary</a>
+    <a href="prd.html" class="active">PRD &amp; Architecture</a>
+    <a href="frd.html">Functional Requirements</a>
+    <div class="nav-section">Quick Links</div>
+    <a href="#section-5">MVP Scope (Phase 1)</a>
+    <a href="#section-7">Technical Recommendations</a>
+    <a href="frd.html">Requirement Tracker</a>
+  </nav>
+  <div class="sidebar__footer">
+    Last updated: <span id="last-updated">--</span>
+  </div>
+</aside>
+
+<!-- Mobile overlay -->
+<div class="sidebar-overlay"></div>
+
+<!-- Main content -->
+<div class="main">
+
+  <!-- Top bar -->
+  <header class="topbar">
+    <button class="hamburger" aria-label="Toggle navigation">&#9776;</button>
+    <div class="topbar__title">PRD &amp; Architecture</div>
+    <div class="topbar__meta">Full Product Requirements Document</div>
+  </header>
+
+  <!-- Content -->
+  <div class="content">
+    <div class="prd-layout">
+
+      <!-- Table of Contents -->
+      <nav class="toc">
+        <div class="toc__title">Contents</div>
+        <a href="#section-overview">Overview</a>
+        <a href="#section-1">1. System Context</a>
+        <a href="#section-1-arena" class="toc--indent">Arena Specifications</a>
+        <a href="#section-1-hardware" class="toc--indent">Hardware</a>
+        <a href="#section-1-comms" class="toc--indent">Communication</a>
+        <a href="#section-2">2. Functional Requirements</a>
+        <a href="#section-2-1" class="toc--indent">2.1 Arena Calibration</a>
+        <a href="#section-2-2" class="toc--indent">2.2 Our Robot Tracking</a>
+        <a href="#section-2-3" class="toc--indent">2.3 Enemy Robot Tracking</a>
+        <a href="#section-2-4" class="toc--indent">2.4 Strategy Engine</a>
+        <a href="#section-2-5" class="toc--indent">2.5 ESP32 Communication</a>
+        <a href="#section-2-6" class="toc--indent">2.6 Web Dashboard</a>
+        <a href="#section-3">3. Non-Functional Requirements</a>
+        <a href="#section-4">4. Architecture</a>
+        <a href="#section-5">5. MVP Scope</a>
+        <a href="#section-6">6. Research Findings</a>
+        <a href="#section-6a" class="toc--indent">6A. Robot Combat Events</a>
+        <a href="#section-6b" class="toc--indent">6B. OAK-D Pro Camera</a>
+        <a href="#section-6c" class="toc--indent">6C. CV Motion Tracking</a>
+        <a href="#section-6d" class="toc--indent">6D. ESP32 Communication</a>
+        <a href="#section-7">7. Technical Recommendations</a>
+        <a href="#section-7-1" class="toc--indent">7.1 Camera &amp; Mounting</a>
+        <a href="#section-7-2" class="toc--indent">7.2 ArUco Markers</a>
+        <a href="#section-7-3" class="toc--indent">7.3 Enemy Detection</a>
+        <a href="#section-7-4" class="toc--indent">7.4 Sensor Fusion</a>
+        <a href="#section-7-5" class="toc--indent">7.5 Comms Protocol</a>
+        <a href="#section-7-6" class="toc--indent">7.6 FPS vs Resolution</a>
+        <a href="#section-7-7" class="toc--indent">7.7 Risks &amp; Mitigations</a>
+      </nav>
+
+      <!-- PRD Content -->
+      <div class="prd-content">
+
+        <!-- ========== OVERVIEW ========== -->
+        <h1 id="section-overview">Brick for Brains &amp; Autonomous Control System</h1>
+        <p>An autonomous combat robotics system that uses computer vision to track robots in an arena, make strategic decisions, and control our robot to push the opponent into a corner pit &mdash; all without human intervention during a match.</p>
+
+        <hr>
+
+        <!-- ========== 1. SYSTEM CONTEXT ========== -->
+        <h2 id="section-1">1. System Context</h2>
+
+        <h3 id="section-1-arena">Arena Specifications</h3>
+        <ul>
+          <li><strong>Dimensions:</strong> 8ft x 8ft enclosed arena</li>
+          <li><strong>Walls:</strong> Polycarbonate, 4ft tall</li>
+          <li><strong>Ceiling:</strong> Opaque, with LED lighting from above (top-down illumination)</li>
+          <li><strong>Floor:</strong> White surface with a logo in the center</li>
+          <li><strong>Pit:</strong> Located in one corner; robots pushed into the pit are eliminated</li>
+        </ul>
+
+        <h3 id="section-1-hardware">Hardware</h3>
+        <div class="table-wrapper">
+          <table>
+            <thead><tr><th>Component</th><th>Details</th></tr></thead>
+            <tbody>
+              <tr><td><strong>Camera</strong></td><td>OAK-D Pro (Luxonis) &mdash; RGB + stereo depth, mounted above arena looking down through/above ceiling</td></tr>
+              <tr><td><strong>PC</strong></td><td>Host machine running the vision pipeline, strategy engine, and web dashboard</td></tr>
+              <tr><td><strong>Our Robot</strong></td><td>ESP32 microcontroller, WiFi-controlled, onboard IMU, ArUco tags on top and bottom</td></tr>
+              <tr><td><strong>Enemy Robot</strong></td><td>Human-controlled, no ArUco tags, unknown appearance</td></tr>
+            </tbody>
+          </table>
+        </div>
+
+        <h3 id="section-1-comms">Communication</h3>
+        <ul>
+          <li><strong>PC to ESP32:</strong> WiFi (UDP or TCP commands)</li>
+          <li><strong>ESP32 to PC:</strong> IMU telemetry stream (orientation, acceleration)</li>
+          <li><strong>PC:</strong> Runs all vision processing, strategy, and the web dashboard</li>
+        </ul>
+
+        <hr>
+
+        <!-- ========== 2. FUNCTIONAL REQUIREMENTS ========== -->
+        <h2 id="section-2">2. Functional Requirements</h2>
+
+        <h3 id="section-2-1">2.1 Arena Calibration</h3>
+        <p><strong>On initialization,</strong> the operator manually places a single ArUco tag at each of the four corners sequentially. The system captures each placement to establish:</p>
+        <ul>
+          <li>Arena boundary coordinates in camera space</li>
+          <li>Homography transform: camera pixels &rarr; arena coordinate system (0,0 to 8,8 in feet)</li>
+          <li>Pit location and boundary (identified by a dedicated ArUco tag placed at/near the pit)</li>
+        </ul>
+        <p><strong>Requirements:</strong></p>
+        <ul>
+          <li>Guided calibration flow: system prompts operator for each corner placement in order</li>
+          <li>Visual confirmation that each corner was captured correctly</li>
+          <li>Persist calibration data so it survives restarts within a session</li>
+          <li>Manual adjustment of bounds via the web dashboard post-calibration</li>
+          <li>Re-calibration option without full restart</li>
+        </ul>
+
+        <h3 id="section-2-2">2.2 Robot Tracking &mdash; Our Robot (ArUco-based)</h3>
+        <p>Our robot has ArUco markers on its top and bottom surfaces.</p>
+        <p><strong>Requirements:</strong></p>
+        <ul>
+          <li>Detect ArUco tag from the ceiling-mounted camera to determine:
+            <ul>
+              <li><strong>Position</strong> (x, y) in arena coordinates</li>
+              <li><strong>Orientation</strong> (heading angle) from tag rotation</li>
+            </ul>
+          </li>
+          <li>Fuse with IMU data from the ESP32 for higher-frequency orientation updates between camera frames</li>
+          <li>Target tracking rate: &ge;30 Hz effective position updates (camera + IMU fusion)</li>
+          <li>Handle temporary occlusion (e.g., robots colliding, dust) with prediction/extrapolation</li>
+          <li>Bottom ArUco tag serves as backup if robot flips</li>
+        </ul>
+
+        <h3 id="section-2-3">2.3 Robot Tracking &mdash; Enemy Robot (Vision-based)</h3>
+        <p>The enemy robot has no markers. Detection must rely on visual features.</p>
+        <p><strong>Requirements:</strong></p>
+        <ul>
+          <li>Detect the enemy robot using contrast against the white floor</li>
+          <li>Use depth data from OAK-D Pro stereo to distinguish robot from floor features (logo, shadows)</li>
+          <li>Track enemy position (x, y) and estimate heading from motion vector</li>
+          <li>Handle cases where robots are overlapping or adjacent (use our robot's known position to disambiguate)</li>
+          <li>Estimate enemy velocity and acceleration for strategic prediction</li>
+          <li>Must work with varying robot shapes/colors across different opponents</li>
+        </ul>
+
+        <h3 id="section-2-4">2.4 Autonomous Strategy Engine</h3>
+        <p>The system decides how to move our robot to push the opponent into the pit.</p>
+        <p><strong>Inputs:</strong> Our robot pose (x, y, heading), enemy pose (x, y, estimated heading), enemy velocity, pit location, arena bounds.</p>
+        <p><strong>Outputs:</strong> Motor commands sent to ESP32 (direction, speed, rotation).</p>
+        <p><strong>Core behaviors:</strong></p>
+        <ul>
+          <li><strong>Pursue:</strong> Close distance to enemy robot</li>
+          <li><strong>Position:</strong> Maneuver to get behind/beside the enemy relative to the pit</li>
+          <li><strong>Push:</strong> Drive into the enemy to push it toward the pit</li>
+          <li><strong>Retreat:</strong> Back away if in a disadvantageous position</li>
+          <li><strong>Avoid pit:</strong> Never drive our own robot into the pit</li>
+        </ul>
+        <p><strong>Additional requirements:</strong></p>
+        <ul>
+          <li>Strategy configurable via the web dashboard (aggression level, preferred approach angle, retreat thresholds)</li>
+          <li>State machine or behavior tree architecture for clear strategy logic</li>
+          <li>Real-time strategy decisions at &ge;10 Hz</li>
+        </ul>
+
+        <h3 id="section-2-5">2.5 ESP32 Communication</h3>
+        <p><strong>Requirements:</strong></p>
+        <ul>
+          <li>WiFi link between PC and ESP32</li>
+          <li>Command protocol for motor control:
+            <ul>
+              <li>Differential drive or mecanum commands (depending on robot drivetrain)</li>
+              <li>Speed and direction per motor/side</li>
+              <li>Emergency stop command</li>
+            </ul>
+          </li>
+          <li>Telemetry stream from ESP32 to PC:
+            <ul>
+              <li>IMU data (gyro, accelerometer) at high rate (&ge;100 Hz)</li>
+              <li>Battery voltage</li>
+              <li>Connection health/heartbeat</li>
+            </ul>
+          </li>
+          <li>Latency target: &lt;20ms round-trip for motor commands</li>
+          <li>Auto-reconnect on WiFi dropout</li>
+          <li>Failsafe: robot stops if communication lost for &gt;200ms</li>
+        </ul>
+
+        <h3 id="section-2-6">2.6 Web-Based Admin Dashboard</h3>
+        <p>A browser-based interface for configuration, monitoring, and debugging.</p>
+
+        <h4>Live View</h4>
+        <ul>
+          <li>Real-time top-down arena visualization (arena boundaries, pit, robot positions and trails, strategy state)</li>
+          <li>Raw camera feed overlay option</li>
+          <li>FPS and latency indicators</li>
+        </ul>
+
+        <h4>Calibration</h4>
+        <ul>
+          <li>Guided calibration wizard</li>
+          <li>Manual adjustment of corner positions (drag-and-drop on arena map)</li>
+          <li>Pit boundary adjustment</li>
+          <li>Save/load calibration profiles</li>
+        </ul>
+
+        <h4>Strategy Configuration</h4>
+        <ul>
+          <li>Adjust strategy parameters (aggression, approach angles, retreat thresholds, speed limits)</li>
+          <li>Select between strategy presets</li>
+          <li>Enable/disable specific behaviors</li>
+          <li>Visualize strategy decision boundaries on the arena map</li>
+        </ul>
+
+        <h4>Testing &amp; Debug</h4>
+        <ul>
+          <li>Manual motor control (virtual joystick / WASD) &mdash; override autonomous mode</li>
+          <li>Raw sensor data display (IMU values, camera FPS, depth map)</li>
+          <li>ArUco detection visualization (show detected markers with IDs and poses)</li>
+          <li>Enemy detection visualization (contours, bounding boxes, confidence)</li>
+          <li>Latency and timing graphs</li>
+          <li>Log viewer with filtering</li>
+          <li>Record/playback for match analysis</li>
+        </ul>
+
+        <h4>Connection Status</h4>
+        <ul>
+          <li>ESP32 connection state and signal strength</li>
+          <li>Camera connection state</li>
+          <li>System resource usage (CPU, memory, GPU)</li>
+        </ul>
+
+        <hr>
+
+        <!-- ========== 3. NON-FUNCTIONAL ========== -->
+        <h2 id="section-3">3. Non-Functional Requirements</h2>
+
+        <h3>Performance</h3>
+        <ul>
+          <li>Vision pipeline must process at &ge;30 FPS on the host PC</li>
+          <li>End-to-end latency (camera capture &rarr; motor command sent): &lt;50ms</li>
+          <li>Web dashboard updates at &ge;10 FPS for live visualization</li>
+        </ul>
+
+        <h3>Reliability</h3>
+        <ul>
+          <li>System must handle and recover from: camera frame drops, WiFi interruptions, ArUco detection failures</li>
+          <li>Failsafe behaviors must activate within 200ms of any critical failure</li>
+          <li>No single dropped frame should cause erratic robot behavior (use smoothing/prediction)</li>
+        </ul>
+
+        <h3>Usability</h3>
+        <ul>
+          <li>Calibration process completable in &lt;60 seconds</li>
+          <li>Dashboard accessible from any device on the local network</li>
+          <li>System operational with minimal setup between matches</li>
+        </ul>
+
+        <hr>
+
+        <!-- ========== 4. ARCHITECTURE ========== -->
+        <h2 id="section-4">4. High-Level Architecture</h2>
+
+        <!-- CSS-based Architecture Diagram -->
+        <div class="arch-diagram" style="max-width:800px;">
+          <div style="border:2px solid #5f6368;border-radius:8px;padding:20px;background:#f8f9fa;">
+            <div style="text-align:center;font-weight:700;margin-bottom:16px;color:#1e2a38;">Host PC</div>
+            <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-bottom:16px;">
+              <div class="arch-diagram__box">
+                <div style="font-size:.75rem;color:#5f6368;margin-bottom:4px;">Input</div>
+                <strong>OAK-D Pro Camera</strong>
+                <div style="font-size:.75rem;margin-top:4px;">RGB + Stereo Depth</div>
+              </div>
+              <div class="arch-diagram__box">
+                <div style="font-size:.75rem;color:#5f6368;margin-bottom:4px;">Processing</div>
+                <strong>Vision Pipeline</strong>
+                <div style="font-size:.75rem;margin-top:4px;">ArUco &bull; Enemy &bull; Depth &bull; Calibration</div>
+              </div>
+            </div>
+            <div style="text-align:center;color:#5f6368;margin:8px 0;font-size:1.25rem;">&#8595;</div>
+            <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-bottom:16px;">
+              <div class="arch-diagram__box arch-diagram__box--accent">
+                <div style="font-size:.75rem;color:#5f6368;margin-bottom:4px;">Decision</div>
+                <strong>Strategy Engine</strong>
+                <div style="font-size:.75rem;margin-top:4px;">State Machine &bull; Path Planning &bull; Push Logic</div>
+              </div>
+              <div class="arch-diagram__box arch-diagram__box--secondary">
+                <div style="font-size:.75rem;color:#5f6368;margin-bottom:4px;">Interface</div>
+                <strong>Web Dashboard</strong>
+                <div style="font-size:.75rem;margin-top:4px;">Live View &bull; Calibration &bull; Strategy &bull; Debug</div>
+              </div>
+            </div>
+            <div style="text-align:center;color:#5f6368;margin:8px 0;font-size:1.25rem;">&#8595;</div>
+            <div style="max-width:360px;margin:0 auto;">
+              <div class="arch-diagram__box">
+                <div style="font-size:.75rem;color:#5f6368;margin-bottom:4px;">Network</div>
+                <strong>Comms Layer (WiFi &rarr; ESP32)</strong>
+                <div style="font-size:.75rem;margin-top:4px;">Motor Commands &bull; IMU Telemetry &bull; Heartbeat</div>
+              </div>
+            </div>
+          </div>
+          <div style="text-align:center;color:#5f6368;margin:12px 0;font-size:1.25rem;">&#8595; WiFi</div>
+          <div style="max-width:280px;margin:0 auto;">
+            <div class="arch-diagram__box" style="border-color:#34a853;">
+              <div style="font-size:.75rem;color:#5f6368;margin-bottom:4px;">Embedded</div>
+              <strong>ESP32</strong>
+              <div style="font-size:.75rem;margin-top:4px;">Motors &bull; IMU &bull; Battery</div>
+            </div>
+          </div>
+        </div>
+
+        <h3>Suggested Tech Stack</h3>
+        <div class="table-wrapper">
+          <table>
+            <thead><tr><th>Layer</th><th>Technology</th><th>Rationale</th></tr></thead>
+            <tbody>
+              <tr><td><strong>Vision Pipeline</strong></td><td>Python + DepthAI SDK</td><td>Native OAK-D Pro support, OpenCV ArUco built-in</td></tr>
+              <tr><td><strong>Strategy Engine</strong></td><td>Python</td><td>Co-located with vision for low latency, NumPy for math</td></tr>
+              <tr><td><strong>ESP32 Comms</strong></td><td>Python (asyncio UDP)</td><td>Low-latency, async-friendly</td></tr>
+              <tr><td><strong>Backend API</strong></td><td>FastAPI (Python)</td><td>WebSocket support for live data, REST for config</td></tr>
+              <tr><td><strong>Web Dashboard</strong></td><td>React + TypeScript</td><td>Rich interactive UI, WebSocket for real-time updates</td></tr>
+              <tr><td><strong>ESP32 Firmware</strong></td><td>Arduino/PlatformIO (C++)</td><td>Standard ESP32 toolchain</td></tr>
+            </tbody>
+          </table>
+        </div>
+
+        <hr>
+
+        <!-- ========== 5. MVP SCOPE ========== -->
+        <h2 id="section-5">5. MVP Scope (Phase 1)</h2>
+        <p>To get a working system on the arena floor:</p>
+        <ol>
+          <li><strong>Arena calibration</strong> via ArUco corner placement</li>
+          <li><strong>Our robot tracking</strong> via ArUco tag detection</li>
+          <li><strong>Enemy robot tracking</strong> via background subtraction on white floor + depth</li>
+          <li><strong>Basic pursuit strategy</strong> &mdash; drive toward enemy, push toward pit</li>
+          <li><strong>ESP32 motor commands</strong> over WiFi</li>
+          <li><strong>Minimal dashboard</strong> &mdash; live arena view + manual override joystick + connection status</li>
+        </ol>
+
+        <h3>Phase 2 Additions</h3>
+        <ul>
+          <li>Full strategy engine with configurable behaviors</li>
+          <li>IMU sensor fusion</li>
+          <li>Match recording and playback</li>
+          <li>Strategy configuration UI</li>
+          <li>Advanced enemy tracking (Kalman filter, multi-hypothesis)</li>
+        </ul>
+
+        <h3>Phase 3 Additions</h3>
+        <ul>
+          <li>Machine learning-based enemy behavior prediction</li>
+          <li>Automated strategy tuning from recorded matches</li>
+          <li>Multi-camera support for redundancy</li>
+        </ul>
+
+        <hr>
+
+        <!-- ========== 6. RESEARCH FINDINGS ========== -->
+        <h2 id="section-6">6. Research Findings</h2>
+
+        <h3 id="section-6a">6A. Robot Combat Events (RCE)</h3>
+
+        <h4>Weight Classes and Event Format</h4>
+        <ul>
+          <li>Robot Combat Events (robotcombatevents.com) hosts events across multiple weight classes, including a "Gladiator" class for Viper kits and sportsman antweights. The most common competitive classes at local/regional events are <strong>1lb (antweight)</strong> and <strong>3lb (beetleweight)</strong>.</li>
+          <li>NHRL (National Havoc Robot League) &mdash; a major US league &mdash; runs <strong>3lb, 12lb, and 30lb</strong> classes.</li>
+          <li>Registration at RCE events typically costs $25/bot, max 4 bots per team, max 2 per class, different drivers required per class.</li>
+        </ul>
+
+        <h4>Arena Specifications</h4>
+        <ul>
+          <li><strong>Beetleweight (3lb) arenas are typically 8ft x 8ft</strong> with a steel floor, confirming the PRD assumption. Walls are double-layered polycarbonate for safety.</li>
+          <li>Antweight arenas are smaller (5ft x 6ft or 4ft x 4ft).</li>
+          <li>Pits are located in corners with a pronounced lip to prevent accidental drive-ins. The minimum recommended pit gap is 140mm (~5.5 inches). Some arenas feature a 1ft-square modular pit.</li>
+          <li>At least 25% of the arena edge must be un-walled in some rule sets.</li>
+          <li>Walls are typically 3-4ft tall polycarbonate with steel framing.</li>
+        </ul>
+
+        <h4>Match Rules</h4>
+        <ul>
+          <li><strong>Match duration: 3 minutes</strong> (may be shortened to 2 minutes under time pressure).</li>
+          <li>A robot touching the bottom of the pit has lost. If a robot bounces in and out without touching the bottom, the fight continues.</li>
+          <li>If a robot is immobile, a judge starts a <strong>10-second countdown</strong>. If motion is not restored, that robot loses.</li>
+          <li>Judging criteria: <strong>Damage, Control, and Aggression</strong> &mdash; each worth 1 point.</li>
+          <li>Pinning limited to <strong>5 seconds</strong>; grappling limited to <strong>15 seconds</strong>.</li>
+        </ul>
+
+        <h4>Autonomous Robot Rules</h4>
+        <ul>
+          <li>Some events offer a separate autonomous class (1lb and 3lb). Autonomous robots fight on a <strong>3ft diameter raised black surface</strong> with a 1-inch white border.</li>
+          <li>Autonomous robots must be <strong>fully autonomous</strong> &mdash; radio control allowed ONLY for failsafe (emergency stop).</li>
+          <li><strong>Key finding:</strong> The standard beetleweight arena (8x8, white floor, corner pit) is for human-controlled robots. Confirm with event organizers whether autonomous bots use the standard arena or a dedicated autonomous arena.</li>
+        </ul>
+
+        <h4>Common Robot Designs (Beetleweight)</h4>
+        <ul>
+          <li><strong>Wedge/Lifter:</strong> Low-profile wedge; good for pushing opponents into pits.</li>
+          <li><strong>Horizontal Spinner:</strong> Spinning bar or disc. High damage but vulnerable to flipping.</li>
+          <li><strong>Vertical Spinner:</strong> Drum or disc spinning vertically. Popular and effective.</li>
+          <li><strong>Flipper:</strong> Pneumatic or spring-loaded launch mechanism.</li>
+          <li>Typical beetleweight drive speed: <strong>50-100 inches/second (4-8 ft/s)</strong>. Critical for tracking system design.</li>
+        </ul>
+
+        <h4>PRD Assumption Validation</h4>
+        <div class="table-wrapper">
+          <table>
+            <thead><tr><th>Assumption</th><th>Status</th></tr></thead>
+            <tbody>
+              <tr><td>8x8ft arena</td><td><span class="badge badge--complete">Confirmed</span></td></tr>
+              <tr><td>Corner pit</td><td><span class="badge badge--complete">Confirmed</span></td></tr>
+              <tr><td>White floor</td><td><span class="badge badge--complete">Confirmed</span></td></tr>
+              <tr><td>Polycarbonate walls</td><td><span class="badge badge--complete">Confirmed</span></td></tr>
+              <tr><td>External overhead camera allowed</td><td><span class="badge badge--in-progress">Verify with organizers</span></td></tr>
+            </tbody>
+          </table>
+        </div>
+
+        <hr>
+
+        <h3 id="section-6b">6B. OAK-D Pro Camera Capabilities</h3>
+
+        <h4>RGB Camera</h4>
+        <ul>
+          <li><strong>Sensor:</strong> IMX378, 12MP (4056x3040)</li>
+          <li><strong>Video encoding:</strong> 4K/30FPS, 1080p/60FPS, H.264/H.265/MJPEG</li>
+          <li><strong>Standard FOV (OAK-D Pro):</strong> 81 DFOV, 69 HFOV, 55 VFOV</li>
+          <li><strong>Wide-angle FOV (OAK-D Pro W):</strong> 150 DFOV for stereo; 120 or 150 for RGB</li>
+          <li>Fixed-focus variant recommended for overhead mounting (no hunting)</li>
+          <li><strong>Manual exposure control:</strong> 1 to 33,000 microseconds</li>
+        </ul>
+
+        <h4>Stereo Depth</h4>
+        <ul>
+          <li><strong>Baseline:</strong> 7.5cm between left and right stereo cameras</li>
+          <li><strong>Stereo sensors:</strong> OV9282 (global shutter, 1280x800)</li>
+          <li><strong>Depth range:</strong> Ideal 70cm - 12m; MinZ ~20cm (400P + extended disparity)</li>
+          <li><strong>Depth accuracy:</strong> Below 2% error at 70cm with good texture</li>
+          <li><strong>Active stereo:</strong> IR laser dot projector improves depth on textureless surfaces</li>
+          <li><strong>Depth resolutions:</strong> 400P (640x400) and 800P (1280x800)</li>
+        </ul>
+
+        <h4>VPU (Myriad X)</h4>
+        <ul>
+          <li><strong>Processing power:</strong> 4 TOPS total, 1.4 TOPS for AI inference</li>
+          <li>On-device capabilities: neural network inference, H.264/H.265 encoding, image manipulation</li>
+          <li>Script Node runs lightweight Python on-device, but NOT suitable for ArUco detection</li>
+          <li><strong>ArUco detection must run on the HOST</strong>, not the VPU</li>
+          <li>200+ pre-trained models available (MobileNet-SSD, YOLO, etc.)</li>
+        </ul>
+
+        <h4>Pipeline Latency</h4>
+        <ul>
+          <li><strong>Best case:</strong> ~5.2ms average latency (frame capture to host receipt)</li>
+          <li><strong>1080p streaming:</strong> Low latency achievable with USB3</li>
+          <li><strong>4K streaming:</strong> 150-530ms latency &mdash; not suitable for real-time tracking</li>
+          <li><strong>Recommendation:</strong> Use 1080p/60FPS or 720p for lowest latency</li>
+        </ul>
+
+        <h4>Lens Selection for Overhead Coverage</h4>
+        <ul>
+          <li><strong>Standard lens (69 HFOV):</strong> ~11.3ft horizontal coverage at 8ft height &mdash; covers full arena with margin</li>
+          <li><strong>Wide-angle lens (120+ HFOV):</strong> More coverage but barrel distortion reduces marker accuracy</li>
+          <li><strong>Optimal mounting:</strong> 6-7ft above arena floor (10-11ft above ground)</li>
+        </ul>
+
+        <hr>
+
+        <h3 id="section-6c">6C. CV Motion Tracking for Fast Robots</h3>
+
+        <h4>Tracking Speed Requirements</h4>
+        <ul>
+          <li>Beetleweight robots move at <strong>4-8 ft/s</strong> (48-96 inches/second)</li>
+          <li>At 30 FPS: 3.2 inches per frame. At 60 FPS: 1.6 inches per frame</li>
+          <li>60 FPS is strongly recommended for tracking continuity</li>
+        </ul>
+
+        <h4>ArUco Detection</h4>
+        <ul>
+          <li><strong>DICT_4X4_50 recommended</strong> &mdash; fewest bits, most robust at distance, 50 IDs sufficient</li>
+          <li><strong>3-inch markers</strong> appear as ~60 pixels at 1080p from 7ft &mdash; well above the 30px minimum</li>
+          <li>Detection at 1080p: 15-30ms per frame on modern CPU</li>
+          <li>Corner refinement: disable during combat (saves ~5ms), enable during calibration</li>
+        </ul>
+
+        <h4>Motion Blur Mitigation</h4>
+        <ul>
+          <li>To keep blur under 1 pixel at 8 ft/s: exposure &lt;520 microseconds</li>
+          <li>OAK-D Pro supports manual exposure down to 1 microsecond</li>
+          <li>Short exposure = darker image, compensate with ISO increase</li>
+          <li>OV9282 stereo cameras have <strong>global shutter</strong> (no rolling shutter artifacts)</li>
+        </ul>
+
+        <h4>Background Subtraction for Enemy Detection</h4>
+        <ul>
+          <li><strong>MOG2 (Mixture of Gaussians)</strong> from OpenCV is well-suited</li>
+          <li>Challenge: center logo will confuse simple background subtraction</li>
+          <li>Solutions: reference frame differencing, homography-based background model, depth thresholding</li>
+          <li><strong>Depth-based detection</strong> is more robust: set threshold >1 inch above floor plane</li>
+          <li>Depth accuracy at 2m: ~2-4% = 4-8cm &mdash; marginal, so combine depth with appearance</li>
+        </ul>
+
+        <h4>State Estimation</h4>
+        <ul>
+          <li><strong>Extended Kalman Filter (EKF) recommended</strong> for camera + IMU fusion</li>
+          <li>State vector: <code>[x, y, vx, vy, heading, angular_velocity]</code></li>
+          <li>EKF runs in &lt;1ms per update, suitable for 60Hz real-time fusion</li>
+          <li>Particle filter is overkill &mdash; 10-100x more expensive, not needed with ArUco direct position</li>
+        </ul>
+
+        <h4>IMU + Camera Sensor Fusion</h4>
+        <ul>
+          <li>Camera: absolute position at 30-60 Hz; IMU: relative orientation at 100-500 Hz</li>
+          <li>EKF prediction step uses IMU between camera frames; correction step uses camera</li>
+          <li><strong>Complementary filter</strong> is a simpler MVP alternative &mdash; upgrade to EKF in Phase 2</li>
+        </ul>
+
+        <h4>Enemy Detection Without Markers</h4>
+        <ol>
+          <li><strong>Depth thresholding:</strong> objects elevated >2cm above floor are candidates</li>
+          <li><strong>Background subtraction:</strong> MOG2 or frame differencing against calibration reference</li>
+          <li><strong>Exclusion masking:</strong> subtract our robot's known footprint</li>
+          <li><strong>Contour analysis:</strong> largest remaining contour = enemy</li>
+          <li><strong>Fallback:</strong> appearance-based detection with logo area masked</li>
+        </ol>
+
+        <hr>
+
+        <h3 id="section-6d">6D. ESP32 Communication</h3>
+
+        <h4>Protocol Comparison</h4>
+        <div class="table-wrapper">
+          <table>
+            <thead><tr><th>Protocol</th><th>Median Latency</th><th>Pros</th><th>Cons</th></tr></thead>
+            <tbody>
+              <tr><td><strong>WiFi UDP</strong></td><td>~5-10ms RTT</td><td>Simple, standard networking, works with any AP</td><td>Requires WiFi AP, no delivery guarantee</td></tr>
+              <tr><td><strong>WiFi TCP</strong></td><td>~5-10ms RTT</td><td>Reliable delivery, similar latency</td><td>Slightly more overhead, Nagle's must be disabled</td></tr>
+              <tr><td><strong>ESP-NOW</strong></td><td>~1-3ms RTT</td><td>Lowest latency, peer-to-peer, no AP needed</td><td>250-byte limit, needs second ESP32, cannot coexist with WiFi</td></tr>
+              <tr><td><strong>WebSockets</strong></td><td>~10-20ms RTT</td><td>Full duplex, easy web integration</td><td>Runs over TCP, higher overhead</td></tr>
+            </tbody>
+          </table>
+        </div>
+
+        <h4>WiFi Optimization</h4>
+        <ul>
+          <li>Disable WiFi power saving on ESP32 (modem sleep causes 100ms+ spikes)</li>
+          <li>Place WiFi and LwIP stacks in IRAM for faster interrupt handling</li>
+          <li>Disable Nagle's Algorithm if using TCP (<code>TCP_NODELAY</code>)</li>
+          <li>Use a dedicated WiFi AP</li>
+          <li>Best achievable: ~2ms one-way; realistic arena: 5-15ms RTT</li>
+        </ul>
+
+        <h4>Motor Control Patterns</h4>
+        <ul>
+          <li>Command format: <code>(left_speed, right_speed)</code> as signed integers (-255 to +255 or -1000 to +1000)</li>
+          <li>Command rate: 50-100 Hz for smooth control</li>
+          <li>Watchdog: ESP32 stops motors if no command in 200ms</li>
+          <li>Motor driver: DRV8871 (2A/channel) or L298N</li>
+          <li>PWM: 20-25 kHz for silent operation</li>
+          <li>Acceleration ramping on ESP32 firmware to prevent wheel spin</li>
+        </ul>
+
+        <h4>Polycarbonate Arena Interference</h4>
+        <ul>
+          <li>Polycarbonate is <strong>RF-transparent</strong> at 2.4 GHz</li>
+          <li>Steel floor/frame may cause multipath reflections (affects range, not latency)</li>
+          <li>Position WiFi AP directly above or beside the arena</li>
+        </ul>
+
+        <hr>
+
+        <!-- ========== 7. TECHNICAL RECOMMENDATIONS ========== -->
+        <h2 id="section-7">7. Technical Recommendations</h2>
+
+        <h3 id="section-7-1">7.1 Camera Selection and Mounting</h3>
+        <div class="table-wrapper">
+          <table>
+            <thead><tr><th>Decision</th><th>Recommendation</th><th>Rationale</th></tr></thead>
+            <tbody>
+              <tr><td><strong>Camera model</strong></td><td>OAK-D Pro (standard FOV, fixed-focus)</td><td>69 HFOV covers 8ft arena from 7ft height. Wide-angle introduces distortion. Fixed-focus avoids hunting.</td></tr>
+              <tr><td><strong>Resolution</strong></td><td>1080p at 60 FPS</td><td>Best balance of resolution and frame rate. 4K adds too much latency.</td></tr>
+              <tr><td><strong>Mounting height</strong></td><td>6-7ft above arena floor</td><td>Covers full 8ft arena. ~240 px/ft at 1080p &mdash; sufficient for 3-inch markers.</td></tr>
+              <tr><td><strong>Exposure</strong></td><td>Manual, 400-500 microseconds</td><td>Freezes motion at 8 ft/s to &lt;1px blur. Increase ISO to compensate.</td></tr>
+              <tr><td><strong>Depth mode</strong></td><td>400P, active stereo (IR on)</td><td>IR helps with textureless floor. 400P reduces processing load.</td></tr>
+            </tbody>
+          </table>
+        </div>
+
+        <h3 id="section-7-2">7.2 ArUco Markers</h3>
+        <div class="table-wrapper">
+          <table>
+            <thead><tr><th>Decision</th><th>Recommendation</th><th>Rationale</th></tr></thead>
+            <tbody>
+              <tr><td><strong>Dictionary</strong></td><td>DICT_4X4_50</td><td>Fewest bits = most robust at distance. Only ~7 IDs needed.</td></tr>
+              <tr><td><strong>Marker size</strong></td><td>3 inches (7.6cm)</td><td>~60px at 1080p from 7ft &mdash; well above 30px minimum. Fits on beetleweight robots.</td></tr>
+              <tr><td><strong>Marker IDs</strong></td><td>0-3: corners, 4: pit, 5: robot top, 6: robot bottom</td><td>Simple, memorable assignment.</td></tr>
+              <tr><td><strong>Corner refinement</strong></td><td>Off during combat, on during calibration</td><td>Saves ~5ms per frame during combat.</td></tr>
+              <tr><td><strong>Printing</strong></td><td>Matte finish, high contrast</td><td>Gloss causes specular reflections under overhead LEDs.</td></tr>
+            </tbody>
+          </table>
+        </div>
+
+        <h3 id="section-7-3">7.3 Enemy Detection Strategy</h3>
+        <div class="table-wrapper">
+          <table>
+            <thead><tr><th>Phase</th><th>Approach</th><th>Details</th></tr></thead>
+            <tbody>
+              <tr><td><strong>MVP</strong></td><td>Reference frame differencing + depth thresholding</td><td>Capture clean background during calibration. Subtract from live frames. Combine with depth (&gt;2cm above floor). Mask our robot.</td></tr>
+              <tr><td><strong>Phase 2</strong></td><td>Add Kalman filter tracking</td><td>Smooth noisy detections, predict through occlusions, estimate velocity.</td></tr>
+              <tr><td><strong>Phase 3</strong></td><td>On-device neural detector</td><td>Train MobileNet-SSD or YOLOv5-nano on combat robot images. Deploy to Myriad X VPU.</td></tr>
+            </tbody>
+          </table>
+        </div>
+
+        <h3 id="section-7-4">7.4 State Estimation and Sensor Fusion</h3>
+        <div class="table-wrapper">
+          <table>
+            <thead><tr><th>Decision</th><th>Recommendation</th><th>Rationale</th></tr></thead>
+            <tbody>
+              <tr><td><strong>Our robot tracking</strong></td><td>Complementary filter (MVP), upgrade to EKF (Phase 2)</td><td>Simpler to implement. EKF provides better accuracy but requires tuning.</td></tr>
+              <tr><td><strong>IMU rate</strong></td><td>100-200 Hz from ESP32</td><td>Robot's onboard IMU provides heading between camera frames.</td></tr>
+              <tr><td><strong>State vector</strong></td><td>[x, y, vx, vy, heading, omega]</td><td>6 states is manageable for EKF.</td></tr>
+              <tr><td><strong>Enemy tracking</strong></td><td>Kalman filter on centroid position</td><td>State: [x, y, vx, vy]. Simpler &mdash; no orientation from markers.</td></tr>
+              <tr><td><strong>Occlusion handling</strong></td><td>Predict forward up to 500ms</td><td>Beyond 500ms, flag position as uncertain.</td></tr>
+            </tbody>
+          </table>
+        </div>
+
+        <h3 id="section-7-5">7.5 Communication Protocol</h3>
+        <div class="table-wrapper">
+          <table>
+            <thead><tr><th>Decision</th><th>Recommendation</th><th>Rationale</th></tr></thead>
+            <tbody>
+              <tr><td><strong>Motor commands</strong></td><td>WiFi UDP</td><td>5-15ms RTT meets &lt;20ms target. No AP bridge needed.</td></tr>
+              <tr><td><strong>IMU telemetry</strong></td><td>WiFi UDP (same link)</td><td>Separate UDP port from motor commands.</td></tr>
+              <tr><td><strong>Packet format</strong></td><td>Binary struct, 12-20 bytes</td><td>Motor: 8 bytes. Telemetry: 20 bytes.</td></tr>
+              <tr><td><strong>Command rate</strong></td><td>50 Hz</td><td>Sufficient for smooth differential drive control.</td></tr>
+              <tr><td><strong>Failsafe</strong></td><td>200ms timeout on ESP32</td><td>Stop both motors if no command received.</td></tr>
+              <tr><td><strong>WiFi optimization</strong></td><td>Disable modem sleep, dedicated AP, disable Nagle's</td><td>Critical for consistent low latency.</td></tr>
+            </tbody>
+          </table>
+        </div>
+
+        <h3 id="section-7-6">7.6 Frame Rate vs Resolution Trade-offs</h3>
+        <div class="table-wrapper">
+          <table>
+            <thead><tr><th>Resolution</th><th>Max FPS</th><th>Px/ft</th><th>3" Marker</th><th>Latency</th><th>Recommendation</th></tr></thead>
+            <tbody>
+              <tr><td>4K (3840x2160)</td><td>30</td><td>~480</td><td>~120px</td><td>150-530ms</td><td><span class="risk-high">Do not use</span></td></tr>
+              <tr><td>1080p (1920x1080)</td><td>60</td><td>~240</td><td>~60px</td><td>~5-10ms</td><td><strong>Primary choice</strong></td></tr>
+              <tr><td>720p (1280x720)</td><td>60+</td><td>~160</td><td>~40px</td><td>~3-5ms</td><td>Fallback if CPU constrained</td></tr>
+            </tbody>
+          </table>
+        </div>
+
+        <h3 id="section-7-7">7.7 Key Risks and Mitigations</h3>
+        <div class="table-wrapper">
+          <table>
+            <thead><tr><th>Risk</th><th>Impact</th><th>Mitigation</th></tr></thead>
+            <tbody>
+              <tr>
+                <td>Depth accuracy marginal at 2m range</td>
+                <td><span class="risk-high">High</span></td>
+                <td>Combine depth with appearance-based detection; do not rely on depth alone</td>
+              </tr>
+              <tr>
+                <td>Motion blur despite short exposure</td>
+                <td><span class="risk-medium">Medium</span></td>
+                <td>Set exposure to 400-500us; increase ISO; accept slightly noisier image</td>
+              </tr>
+              <tr>
+                <td>WiFi latency spikes in arena</td>
+                <td><span class="risk-high">High</span></td>
+                <td>Dedicated AP; disable power saving; command prediction on ESP32</td>
+              </tr>
+              <tr>
+                <td>ArUco occluded during collisions</td>
+                <td><span class="risk-medium">Medium</span></td>
+                <td>IMU dead reckoning up to 500ms; bottom marker backup</td>
+              </tr>
+              <tr>
+                <td>Logo on floor confuses background subtraction</td>
+                <td><span class="risk-medium">Medium</span></td>
+                <td>Mask logo region using calibration data; prioritize depth</td>
+              </tr>
+              <tr>
+                <td>Autonomous class uses different arena format</td>
+                <td><span class="risk-high">High</span></td>
+                <td>Verify with organizers; support configurable arena geometry</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+
+      </div><!-- /prd-content -->
+    </div><!-- /prd-layout -->
+  </div><!-- /content -->
+</div><!-- /main -->
+
+<script src="js/dashboard.js"></script>
+</body>
+</html>

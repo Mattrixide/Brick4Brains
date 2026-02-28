@@ -185,8 +185,8 @@ class TrackedObject:
 ## 3. File Structure
 
 ```
-tracker/
-  prototype/
+prototypes/
+  cv-tracking/
     main.py              # Entry point, mode switching, keyboard controls, display loop
     capture.py           # ThreadedCamera class (threaded webcam capture)
     detectors.py         # ArUcoDetector, ColorDetector, BackgroundSubDetector classes

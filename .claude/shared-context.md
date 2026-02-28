@@ -29,6 +29,11 @@ This file is read and updated by all agents. Keep it organized by topic.
 - Camera exposure: 400-500us freezes motion at 8ft/s to <1px blur
 - WiFi UDP latency: 5-15ms RTT (meets <20ms target)
 
+## Dashboard
+
+- **Milestones section** added to `dashboard/index.html` — expandable accordion cards for Milestones 0-6 with work items and status dots. Replaces the old simple timeline.
+- TPM should update milestone work item statuses after planning sessions (look for the comment "work items updated after planning sessions" in the HTML).
+
 ## Known Issues
 
 - TX15 USB serial driver fails on Windows 11 (STM32 CDC composite device error code 10)
@@ -37,11 +42,11 @@ This file is read and updated by all agents. Keep it organized by topic.
 
 ## Prototypes
 
-### prototype/ (CV Tracking - COMPLETE)
+### prototypes/cv-tracking/ (CV Tracking - COMPLETE)
 - Validates: ArUco detection, color tracking, BGSub, Kalman filtering, threaded capture
 - Status: Working, tested with multiple cameras and resolutions
 
-### drive-test/ (TX15 Drive Test - IN PROGRESS)
+### prototypes/drive-test/ (TX15 Drive Test - IN PROGRESS)
 - Validates: SBUS motor control via TX15, ArUco-guided autonomous driving
 - Status: Code complete, blocked on TX15 USB driver issue
 - Test plan: Spin left 360, spin right 360 + manual WASD control

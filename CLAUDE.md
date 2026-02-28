@@ -8,8 +8,9 @@ Autonomous combat robotics system — computer vision tracking, strategy engine,
 B4B/
   docs/              # PRD, research, prototype plans
   dashboard/         # Static HTML project dashboard (open index.html)
-  prototype/         # Webcam CV tracking prototype (ArUco, color, BGSub, Kalman)
-  drive-test/        # TX15 SBUS drive test prototype (ArUco tracking + motor control)
+  prototypes/        # Isolated prototype experiments
+    cv-tracking/     # Webcam CV tracking prototype (ArUco, color, BGSub, Kalman)
+    drive-test/      # TX15 SBUS drive test prototype (ArUco tracking + motor control)
   .claude/
     agents/          # Agent role definitions (prototyper, researcher, architect, pm)
     shared-context.md # Shared knowledge base — all agents read/write this

@@ -467,33 +467,25 @@ class AutoDriveApp:
                     elif state == PursuitState.SEARCH:
                         throttle = 0.0
                         steering = 0.0
-                    elif abs(heading_error) > turn_threshold:
-                        # TURN: send to ESP32 gyro turn (executes at 104Hz on-board)
+                    elif abs(heading_error) > turn_threshold and distance > 30.0:
+                        # FAR + misaligned: stop and turn in place
                         throttle = 0.0
-                        steering = 0.0
-                        if hasattr(self.comms, 'send_turn') and not self.comms._dry_run:
-                            self.comms.send_turn(math.degrees(heading_error))
+                        if abs(heading_error) > 1.5:
+                            steering = 0.8 if heading_error > 0 else -0.8
+                        elif abs(heading_error) > 0.5:
+                            steering = 0.5 if heading_error > 0 else -0.5
                         else:
-                            # Fallback: direct steering
-                            if abs(heading_error) > 1.5:
-                                steering = 0.8 if heading_error > 0 else -0.8
-                            else:
-                                steering = max(-0.8, min(0.8, heading_error * 0.6))
+                            steering = max(-0.4, min(0.4, heading_error * 0.8))
                     else:
-                        # DRIVE: speed proportional to distance, gentle steering
-                        if distance < 10.0:
+                        # DRIVE: steer while moving — don't stop near enemy
+                        if distance < 5.0:
+                            # On top of enemy — stop
                             throttle = 0.0
                             steering = 0.0
-                        elif distance < 40.0:
-                            # Close approach — slow down
-                            throttle = 0.3 + 0.4 * (distance / 40.0)
-                            steering = heading_error * 0.3
-                            steering = max(-0.3, min(0.3, steering))
                         else:
-                            # Far — full speed, moderate correction
-                            throttle = min(0.8, distance / 60.0)
-                            steering = heading_error * 0.5
-                            steering = max(-0.4, min(0.4, steering))
+                            # Drive + steer simultaneously
+                            throttle = min(0.8, distance / 40.0)
+                            steering = max(-0.6, min(0.6, heading_error * 0.5))
 
                     # Debug log at 2Hz
                     if not hasattr(self, '_intercept_log_t'):
@@ -524,12 +516,14 @@ class AutoDriveApp:
                     steering = ctrl.steering
                     buttons = ctrl.buttons
 
-            # 6. Apply mix + dead zone boost (AUTO and INTERCEPT modes)
-            if self.mode in (MODE_AUTO, MODE_INTERCEPT):
-                # ESP32 has invertThrottle=-1 and invertSteering=-1
-                # (tuned for Xbox controller). Autonomy sends positive=forward,
-                # so we negate to match the ESP32's inversion.
+            # 6. Apply inversions for ESP32 (invertThrottle=-1, invertSteering=-1)
+            if self.mode == MODE_AUTO:
+                # AUTO click-to-point — tested and working with both negated
                 throttle = -throttle
+                steering = -steering
+            elif self.mode == MODE_INTERCEPT:
+                # INTERCEPT uses IMU heading — steering needs negation, throttle does NOT
+                # (IMU forward is opposite to ArUco forward due to marker orientation)
                 steering = -steering
 
             if self.mode == MODE_AUTO:

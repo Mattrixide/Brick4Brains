@@ -29,6 +29,20 @@ This file is read and updated by all agents. Keep it organized by topic.
 - Camera exposure: 400-500us freezes motion at 8ft/s to <1px blur
 - WiFi UDP latency: 5-15ms RTT (meets <20ms target)
 
+### ArUco Optimization Deep-Dive (see `docs/aruco-optimization-research.md`)
+
+- **MJPG codec**: Switch from YUY2 to MJPG for 2-3x higher capture FPS at 720p+. Set fourcc before resolution.
+- **Adaptive threshold tuning**: Reduce `adaptiveThreshWinSizeMax` from 23 to 15, step from 10 to 6 — gives 3 passes instead of 3 (same count but tighter range). Single-pass (Min=Max=5) is fastest but risky.
+- **Marker perimeter rates**: Set `minMarkerPerimeterRate=0.04`, `maxMarkerPerimeterRate=0.25` for 720p to reject false candidates before expensive decode.
+- **720p is the sweet spot**: 50mm markers appear as 17-33px/side at 720p (1.5-3m range). Min detectable is ~13px/side. 1080p gives 25-50px but costs 2x processing.
+- **Corner refinement**: CORNER_REFINE_NONE is fastest (1x). APRILTAG doubles detection range but is 5-8x slower. Use NONE for tracking, SUBPIX only for calibration.
+- **CLAHE preprocessing**: Useful for uneven arena LED lighting. Apply to grayscale, ~1.5ms cost. Needs testing under actual conditions.
+- **ROI cropping**: Crop to arena region for proportional speedup. Combine with Kalman prediction for tighter ROI.
+- **Do NOT use**: Gaussian blur (hurts borders), global histogram EQ (amplifies noise), Python multiprocessing with ArUco (known hang bug #11140), UMat/GPU for ArUco (only 5-6% GPU utilization).
+- **Default exposure should be -11 (~488us)** not -7 (~7.8ms) for combat speeds.
+- **DICT_4X4_50 confirmed optimal**: Lowest pixel requirement, maximum inter-marker distance for <=50 IDs, fastest decode.
+- **Projected end-to-end latency**: 8-15ms at 720p with tuned parameters (well under 30ms target).
+
 ## Dashboard
 
 - **Milestones section** added to `dashboard/index.html` — expandable accordion cards for Milestones 0-6 with work items and status dots. Replaces the old simple timeline.

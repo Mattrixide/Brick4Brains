@@ -187,11 +187,11 @@
         <div class="metric-card__label">In Progress</div>
       </div>
       <div class="metric-card">
-        <div class="metric-card__value">9</div>
+        <div class="metric-card__value">10</div>
         <div class="metric-card__label">Planned</div>
       </div>
       <div class="metric-card">
-        <div class="metric-card__value">11</div>
+        <div class="metric-card__value">12</div>
         <div class="metric-card__label">Total Prototypes</div>
       </div>
     </div>
@@ -349,6 +349,7 @@
             <li>Kalman filter value for smoothing and prediction during occlusion</li>
             <li>Combined pipeline FPS budget (ArUco + BGSub + Kalman in one loop)</li>
             <li>Resolution vs FPS tradeoffs across 480p, 720p, and 1080p</li>
+            <li>Camera capability profiling &mdash; <a href="../prototypes/cv-tracking/camera_report.html">view camera profiles</a> (press <kbd style="font-family:monospace;background:#f4f6f9;border:1px solid #dadce0;border-radius:3px;padding:1px 5px;font-size:.75rem;">i</kbd> while running)</li>
           </ul>
         </div>
         <div class="proto-section">
@@ -379,7 +380,58 @@ numpy</div>
       </div>
     </div>
 
-    <!-- 2. TX15 Drive Test — In Progress -->
+    <!-- 2. Auto-Drive — In Progress -->
+    <div class="proto-card proto-accordion" style="border-left: 4px solid var(--color-warning);">
+      <div class="proto-accordion__header" onclick="this.parentElement.classList.toggle('open')">
+        <div class="proto-accordion__trigger">
+          <div class="proto-accordion__trigger-left">
+            <span class="chevron"></span>
+            <span class="proto-card__title">Auto-Drive (CV Autonomous Control)</span>
+            <span class="proto-card__path">prototypes/auto-drive/</span>
+          </div>
+          <span class="badge badge--in-progress">In Progress</span>
+        </div>
+        <p class="proto-accordion__desc">
+          CV-guided autonomous floor driving with ArUco tracking, ESP32 motor control via UDP, Xbox controller override, and web dashboard for mission management.
+        </p>
+      </div>
+      <div class="proto-accordion__details">
+        <div class="proto-section">
+          <div class="proto-section__label">What it validates</div>
+          <ul>
+            <li>Closed-loop autonomous driving using ArUco position feedback</li>
+            <li>PID waypoint following (square, forward-back, circle missions)</li>
+            <li>ESP32 UDP motor control integration (5-byte packet protocol)</li>
+            <li>Xbox controller override with seamless mode switching</li>
+            <li>Web dashboard for mission control and live status monitoring</li>
+            <li>Pixel-to-world coordinate calibration for floor tracking</li>
+          </ul>
+        </div>
+        <div class="proto-section">
+          <div class="proto-section__label">How to run</div>
+          <div class="proto-run">cd prototypes/auto-drive
+pip install -r requirements.txt
+python main.py --esp32 esp32wifi.local --show-cv
+# Dashboard at http://localhost:5000</div>
+        </div>
+        <div class="proto-section">
+          <div class="proto-section__label">CLI options</div>
+          <div class="proto-controls">
+            <span class="proto-key"><kbd>--esp32 HOST</kbd> ESP32 address (omit for dry-run)</span>
+            <span class="proto-key"><kbd>--camera N</kbd> Camera index (default: 1)</span>
+            <span class="proto-key"><kbd>--show-cv</kbd> Show OpenCV debug window</span>
+            <span class="proto-key"><kbd>--port N</kbd> Dashboard port (default: 5000)</span>
+            <span class="proto-key"><kbd>--px-per-cm F</kbd> Calibration scale</span>
+          </div>
+        </div>
+        <div class="proto-section">
+          <div class="proto-section__label">Dependencies</div>
+          <div class="proto-run">opencv-python, numpy, pygame, flask</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- 3. TX15 Drive Test — In Progress -->
     <div class="proto-card proto-accordion" style="border-left: 4px solid var(--color-warning);">
       <div class="proto-accordion__header" onclick="this.parentElement.classList.toggle('open')">
         <div class="proto-accordion__trigger">
@@ -461,7 +513,77 @@ pyserial</div>
       </div>
     </div>
 
-    <!-- 3. OAK-D Pro Pipeline — Not Started -->
+    <!-- 3. Robot Voice TTS — Not Started -->
+    <div class="proto-card proto-accordion" style="border-left: 4px solid var(--color-border);">
+      <div class="proto-accordion__header" onclick="this.parentElement.classList.toggle('open')">
+        <div class="proto-accordion__trigger">
+          <div class="proto-accordion__trigger-left">
+            <span class="chevron"></span>
+            <span class="proto-card__title">Robot Voice TTS</span>
+            <span class="proto-card__path">prototypes/robot-voice/</span>
+          </div>
+          <span class="badge badge--not-started">Not Started</span>
+        </div>
+        <p class="proto-accordion__desc">
+          Robotic text-to-speech for the management app &mdash; tests vocoder, bitcrush, ring modulation, and pedalboard effect chains over Windows SAPI5 synthesis.
+        </p>
+      </div>
+      <div class="proto-accordion__details">
+        <div class="proto-section">
+          <div class="proto-section__label">What it validates</div>
+          <ul>
+            <li>Offline TTS via Windows SAPI5 (pyttsx3) with robotic post-processing</li>
+            <li>Vocoder, bitcrush, ring modulation, and Spotify pedalboard effect chains</li>
+            <li>voicebox-tts library with built-in vocoder as alternative approach</li>
+            <li>Non-blocking announcer pattern for integration into the control app</li>
+            <li>End-to-end latency (synthesis + effects + playback start)</li>
+          </ul>
+        </div>
+        <div class="proto-section">
+          <div class="proto-section__label">How to run</div>
+          <div class="proto-run">cd prototypes/robot-voice
+pip install -r requirements.txt
+python main.py                    <span class="comment"># Interactive demo</span>
+python main.py --mode vocoder     <span class="comment"># Vocoder robot voice</span>
+python main.py --mode bitcrush    <span class="comment"># Harsh digital robot</span>
+python main.py --mode pedalboard  <span class="comment"># Spotify effects chain</span>
+python main.py --bench            <span class="comment"># Latency benchmark</span></div>
+        </div>
+        <div class="proto-section">
+          <div class="proto-section__label">Voice Modes</div>
+          <div class="proto-controls">
+            <span class="proto-key"><kbd>1</kbd> Vocoder (classic robot)</span>
+            <span class="proto-key"><kbd>2</kbd> Bitcrush (harsh digital)</span>
+            <span class="proto-key"><kbd>3</kbd> Pedalboard (Spotify FX)</span>
+            <span class="proto-key"><kbd>4</kbd> Voicebox (library vocoder)</span>
+            <span class="proto-key"><kbd>5</kbd> Plain SAPI5 (comparison)</span>
+            <span class="proto-key"><kbd>b</kbd> Benchmark</span>
+            <span class="proto-key"><kbd>c</kbd> Custom phrase</span>
+            <span class="proto-key"><kbd>q</kbd> Quit</span>
+          </div>
+        </div>
+        <div class="proto-section">
+          <div class="proto-section__label">Success Criteria</div>
+          <ul>
+            <li>&lt;500ms from text input to audible speech start</li>
+            <li>Recognizably robotic voice across all effect modes</li>
+            <li>Non-blocking announcer does not stall the control loop</li>
+            <li>Works fully offline (no internet required during matches)</li>
+          </ul>
+        </div>
+        <div class="proto-section">
+          <div class="proto-section__label">Dependencies</div>
+          <div class="proto-run">voicebox-tts
+pyttsx3
+pedalboard (Spotify)
+sounddevice
+numpy
+scipy (for vocoder bandpass filters)</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- 4. OAK-D Pro Pipeline — Not Started -->
     <div class="proto-card proto-accordion" style="border-left: 4px solid var(--color-border);">
       <div class="proto-accordion__header" onclick="this.parentElement.classList.toggle('open')">
         <div class="proto-accordion__trigger">

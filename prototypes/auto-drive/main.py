@@ -1,0 +1,932 @@
+"""
+Auto-Drive Prototype — CV-guided autonomous robot control.
+
+Combines ArUco marker tracking with ESP32 motor control, Xbox controller
+override, and a web dashboard for mission management.
+
+Usage:
+    python main.py                                  # dry-run, camera 1
+    python main.py --esp32 esp32wifi.local          # with ESP32
+    python main.py --esp32 192.168.4.65 --camera 0  # custom camera
+    python main.py --esp32 esp32wifi.local --show-cv # show OpenCV window
+    python main.py --help
+"""
+
+import argparse
+import math
+import time
+import threading
+from collections import deque
+
+import cv2
+import numpy as np
+
+from tracker import ThreadedCamera, DepthAICamera, ArUcoTracker, RobotPose, draw_overlay, create_camera
+from comms import RobotComms
+from controller import XboxController
+from autonomy import (
+    PathFollower,
+    get_available_missions,
+    generate_square,
+    generate_forward_back,
+    generate_circle,
+    generate_goto,
+)
+from dashboard_server import DashboardServer, create_shared_state
+
+
+# ---------------------------------------------------------------------------
+# Mode constants
+# ---------------------------------------------------------------------------
+MODE_IDLE = "idle"
+MODE_AUTO = "auto"
+MODE_MANUAL = "manual"
+MODE_CALIBRATING = "calibrating"
+
+
+# ---------------------------------------------------------------------------
+# Mission factory
+# ---------------------------------------------------------------------------
+MISSION_GENERATORS = {
+    "square": lambda p: generate_square(p.get("size_cm", 60.0)),
+    "drive_square": lambda p: generate_square(p.get("size_cm", 60.0)),
+    "forward_back": lambda p: generate_forward_back(p.get("distance_cm", 60.0)),
+    "circle": lambda p: generate_circle(
+        p.get("radius_cm", 30.0), int(p.get("num_points", 8))
+    ),
+    "drive_circle": lambda p: generate_circle(
+        p.get("radius_cm", 30.0), int(p.get("num_points", 8))
+    ),
+    "goto": lambda p: generate_goto(p.get("x_cm", 0.0), p.get("y_cm", 0.0)),
+}
+
+
+# ---------------------------------------------------------------------------
+# Main application
+# ---------------------------------------------------------------------------
+class AutoDriveApp:
+    def __init__(self, args):
+        self.args = args
+        self.mode = MODE_IDLE
+        self.running = True
+
+        # Trail for dashboard visualization
+        self.trail = deque(maxlen=200)
+
+        # Timing
+        self._last_update = time.perf_counter()
+        self._loop_fps = 0.0
+        self._fps_count = 0
+        self._fps_timer = time.perf_counter()
+
+        # Components
+        self.camera = None
+        self.tracker = ArUcoTracker(use_clahe=True)
+        self.comms = RobotComms(host=args.esp32 or None, port=args.udp_port)
+        self.controller = XboxController(deadzone=0.08)
+        self.follower = PathFollower()
+
+        # Heading EMA filter (kills ArUco jitter before it hits PID)
+        self._heading_alpha = 0.35  # lower = smoother, higher = more responsive
+        self._filtered_heading = None
+        self._filtered_x = None
+        self._filtered_y = None
+
+        # Measurement overlay (persists on frame until cleared)
+        self._measure_line = None  # ((x1_px,y1_px), (x2_px,y2_px), dist_cm, label)
+
+        # Stream encoding rate limiter (browser can't display >30fps anyway)
+        self._stream_interval = 1.0 / 30.0
+        self._last_stream_time = 0.0
+
+        # Dashboard shared state
+        self.shared_state = create_shared_state(
+            esp32_host=args.esp32 or "(dry-run)",
+        )
+        self.dashboard = DashboardServer(self.shared_state, port=args.port)
+
+        # Marker size and fallback scale
+        self.tracker.set_marker_size(args.marker_size / 10.0)  # mm -> cm
+        self.tracker.set_scale(args.px_per_cm)
+
+        # Generate ChArUco board image for printing
+        import os
+        self._charuco_path = os.path.join(
+            os.path.dirname(os.path.abspath(__file__)), "charuco_board.png"
+        )
+        if not os.path.exists(self._charuco_path):
+            self.tracker.generate_charuco_board(self._charuco_path)
+
+    def start(self):
+        """Initialize all components and run the main loop."""
+        print("=" * 60)
+        print("  Auto-Drive Prototype")
+        print("=" * 60)
+
+        # Start camera
+        cam_label = "OAK-D Pro" if self.args.oakd else f"camera {self.args.camera}"
+        if self.args.mono:
+            cam_label += " (mono 120fps)"
+        print(f"\n[camera] Opening {cam_label} ...")
+        self.camera = create_camera(
+            src=self.args.camera,
+            resolution_index=1,  # 720p
+            use_oakd=self.args.oakd,
+            use_mono=self.args.mono,
+            target_fps=self.args.fps,
+        ).start()
+        time.sleep(0.5)  # let camera warm up
+        print(f"[camera] Running at {self.camera.fps:.0f} fps")
+
+        # Pass real camera intrinsics to tracker if available (OAK-D)
+        if hasattr(self.camera, 'intrinsics') and self.camera.intrinsics:
+            intr = self.camera.intrinsics
+            frame = self.camera.read()
+            if frame is not None:
+                fh, fw = frame.shape[:2]
+                self.tracker.set_camera_matrix(
+                    fw, fh,
+                    fx=intr['fx'], fy=intr['fy'],
+                    cx=intr['cx'], cy=intr['cy'],
+                )
+
+        # Connect ESP32
+        print(f"\n[comms] Connecting to ESP32 ...")
+        self.comms.connect()
+
+        # Init Xbox controller
+        print(f"\n[controller] Looking for Xbox controller ...")
+        has_controller = self.controller.init()
+        if not has_controller:
+            print("[controller] No controller found — manual override disabled")
+
+        # Set origin to center of first detected frame
+        print(f"\n[tracker] Waiting for first marker detection ...")
+        self._calibrate_origin()
+
+        # Try to load saved calibration (floor plane first, then legacy homography)
+        import os
+        floor_path = os.path.join(
+            os.path.dirname(os.path.abspath(__file__)), "floor_calibration.json"
+        )
+        legacy_path = os.path.join(
+            os.path.dirname(os.path.abspath(__file__)), "homography.json"
+        )
+        self._floor_det = None
+        if os.path.exists(floor_path):
+            self.tracker.load_floor_plane(floor_path)
+            from floor_plane import FloorPlaneDetector
+            self._floor_det = FloorPlaneDetector()  # loads from floor_calibration.json
+        elif os.path.exists(legacy_path):
+            self.tracker.load_homography(legacy_path)
+
+        # Start dashboard with video feed callback
+        self._latest_jpeg = None
+        self._jpeg_lock = threading.Lock()
+        self.dashboard._frame_callback = self._get_jpeg
+        self.dashboard.start()
+        print(f"\n[dashboard] Running at http://localhost:{self.args.port}")
+
+        print(f"\n[main] Ready — mode: {self.mode.upper()}")
+        if self.args.show_cv:
+            print("[main] Press 'q' in CV window to quit")
+        print("[main] Press Ctrl+C to stop\n")
+
+        # Main loop
+        try:
+            self._run_loop()
+        except KeyboardInterrupt:
+            print("\n[main] Shutting down ...")
+        finally:
+            self._shutdown()
+
+    def _calibrate_origin(self):
+        """Auto-calibrate using solvePnP with known marker size.
+
+        Falls back to simple px_per_cm if marker not found.
+        """
+        deadline = time.perf_counter() + 5.0
+        while time.perf_counter() < deadline:
+            frame = self.camera.read()
+            if frame is None:
+                time.sleep(0.05)
+                continue
+            if self.tracker.auto_calibrate(frame, marker_id=self.args.marker_id):
+                return
+            time.sleep(0.05)
+
+        # Fallback: use simple scale + frame center origin
+        print("[tracker] Auto-calibration failed — using simple px_per_cm fallback")
+        frame = self.camera.read()
+        if frame is not None:
+            h, w = frame.shape[:2]
+            self.tracker.set_origin(w / 2, h / 2)
+            print(f"[tracker] Origin set to frame center ({w//2}, {h//2})")
+        else:
+            print("[tracker] WARNING: no frames available")
+
+    def _run_loop(self):
+        """Core loop: track, decide, act."""
+        while self.running:
+            now = time.perf_counter()
+            dt = now - self._last_update
+            self._last_update = now
+
+            # 1. Read camera and track
+            frame = self.camera.read()
+            pose = None
+            if frame is not None:
+                pose = self.tracker.get_robot_pose(frame, marker_id=self.args.marker_id)
+
+            # 2. Convert to world coordinates + EMA filter
+            x_cm, y_cm, heading_rad = 0.0, 0.0, 0.0
+            detected = False
+            if pose is not None:
+                detected = True
+                raw_x, raw_y = self.tracker.px_to_cm(pose.x_px, pose.y_px)
+
+                # Compute heading in world coordinates by transforming
+                # two points along the marker's forward direction
+                hdist = 20.0  # pixel offset along heading
+                fwd_px_x = pose.x_px + hdist * math.cos(pose.heading_rad)
+                fwd_px_y = pose.y_px + hdist * math.sin(pose.heading_rad)
+                try:
+                    fwd_x, fwd_y = self.tracker.px_to_cm(fwd_px_x, fwd_px_y)
+                    raw_heading = math.atan2(fwd_y - raw_y, fwd_x - raw_x)
+                except (ValueError, cv2.error):
+                    raw_heading = pose.heading_rad
+
+                # EMA filter on position and heading
+                a = self._heading_alpha
+                if self._filtered_heading is None:
+                    self._filtered_x = raw_x
+                    self._filtered_y = raw_y
+                    self._filtered_heading = raw_heading
+                else:
+                    self._filtered_x = a * raw_x + (1 - a) * self._filtered_x
+                    self._filtered_y = a * raw_y + (1 - a) * self._filtered_y
+                    # Angle-aware EMA: use angle_diff to avoid wrapping issues
+                    hdiff = math.atan2(
+                        math.sin(raw_heading - self._filtered_heading),
+                        math.cos(raw_heading - self._filtered_heading),
+                    )
+                    self._filtered_heading += a * hdiff
+
+                x_cm = self._filtered_x
+                y_cm = self._filtered_y
+                heading_rad = self._filtered_heading
+                self.trail.append((x_cm, y_cm))
+
+            # 3. Read controller
+            ctrl = self.controller.read()
+
+            # 4. Process dashboard commands
+            self._process_dashboard_commands()
+
+            # 5. State machine
+            throttle, steering, buttons = 0.0, 0.0, 0
+
+            if self.mode == MODE_MANUAL:
+                # Pass through controller input
+                throttle = ctrl.throttle
+                steering = ctrl.steering
+                buttons = ctrl.buttons
+
+            elif self.mode == MODE_AUTO:
+                # Check for controller override — require deliberate input
+                # (higher threshold than deadzone to avoid stick drift triggering)
+                override = (abs(ctrl.throttle) > 0.25 or
+                            abs(ctrl.steering) > 0.25 or
+                            ctrl.buttons != 0)
+                if override:
+                    print("[main] Xbox override detected — switching to MANUAL")
+                    self.mode = MODE_MANUAL
+                    self.follower = PathFollower()  # reset
+                    throttle = ctrl.throttle
+                    steering = ctrl.steering
+                    buttons = ctrl.buttons
+                elif detected:
+                    # Run autonomy
+                    throttle, steering, done, status = self.follower.update(
+                        x_cm, y_cm, heading_rad, dt
+                    )
+                    if done:
+                        print(f"[auto] {status}")
+                        self.mode = MODE_IDLE
+                else:
+                    # Marker lost during auto — hold last steering, zero throttle
+                    throttle = 0.0
+
+            elif self.mode == MODE_CALIBRATING:
+                # Drive with controller while collecting calibration points
+                throttle = ctrl.throttle
+                steering = ctrl.steering
+                buttons = ctrl.buttons
+                # Collect calibration data each frame
+                if frame is not None:
+                    captured, total = self.tracker.update_calibration_drive(
+                        frame, marker_id=self.args.marker_id
+                    )
+                    with self.shared_state["lock"]:
+                        self.shared_state["calib_points"] = total
+
+            elif self.mode == MODE_IDLE:
+                # Check for controller override — require deliberate input
+                override = (abs(ctrl.throttle) > 0.25 or
+                            abs(ctrl.steering) > 0.25 or
+                            ctrl.buttons != 0)
+                if override:
+                    print("[main] Xbox input detected — switching to MANUAL")
+                    self.mode = MODE_MANUAL
+                    throttle = ctrl.throttle
+                    steering = ctrl.steering
+                    buttons = ctrl.buttons
+
+            # 6. Apply mix + dead zone boost (only in AUTO mode)
+            if self.mode == MODE_AUTO:
+                with self.shared_state["lock"]:
+                    t_mix = self.shared_state.get("throttle_mix", 0.6)
+                    s_mix = self.shared_state.get("steering_mix", 0.8)
+                throttle *= t_mix
+                steering *= s_mix
+
+                # Boost past ESC dead zone, but scale with heading error
+                # to avoid overshooting on small corrections
+                min_throttle = 0.25
+                if 0 < abs(throttle) < min_throttle:
+                    throttle = min_throttle if throttle > 0 else -min_throttle
+
+                # Steering: only boost when heading error is large (turning)
+                # When error is small, let the PID output stand (even if below dead zone)
+                heading_err = abs(heading_rad - math.atan2(
+                    self.follower._mission.waypoints[self.follower.current_waypoint_index].y - y_cm,
+                    self.follower._mission.waypoints[self.follower.current_waypoint_index].x - x_cm
+                )) if (self.follower.active and self.follower._mission and
+                       self.follower.current_waypoint_index < len(self.follower._mission.waypoints)
+                       ) else 0.0
+                # Wrap heading error
+                heading_err = abs(math.atan2(math.sin(heading_err), math.cos(heading_err)))
+
+                if heading_err > 0.5:  # >30deg — boost steering for sure
+                    min_steering = 0.30
+                elif heading_err > 0.2:  # 10-30deg — moderate boost
+                    min_steering = 0.20
+                else:
+                    min_steering = 0.0  # <10deg — let PID handle it naturally
+
+                if min_steering > 0 and 0 < abs(steering) < min_steering:
+                    steering = min_steering if steering > 0 else -min_steering
+
+            # 7. Send motor command
+            self.comms.send(throttle, steering, buttons)
+
+            # 8. Update dashboard state
+            self._update_shared_state(
+                x_cm, y_cm, heading_rad, detected, throttle, steering
+            )
+
+            # 9. Encode for dashboard stream at 30fps (control loop runs at full speed)
+            if frame is not None:
+                with self.shared_state["lock"]:
+                    self.shared_state["frame_w"] = frame.shape[1]
+                    self.shared_state["frame_h"] = frame.shape[0]
+
+                if now - self._last_stream_time >= self._stream_interval:
+                    self._last_stream_time = now
+
+                    # Draw overlays only on stream frames (expensive)
+                    stream_frame = frame.copy()
+
+                    with self.shared_state["lock"]:
+                        show_grid = self.shared_state.get("show_grid", True)
+                    if show_grid:
+                        # Use floor plane grid if calibrated, else old grid
+                        if hasattr(self, '_floor_det') and self._floor_det and self._floor_det.calibrated:
+                            self._floor_det.draw_grid(stream_frame)
+                        else:
+                            self._draw_floor_grid(stream_frame)
+
+                    wp_px = self._get_waypoint_pixels()
+                    draw_overlay(stream_frame, pose, waypoints=wp_px)
+
+                    mode_color = {
+                        MODE_IDLE: (200, 200, 200),
+                        MODE_AUTO: (0, 255, 0),
+                        MODE_MANUAL: (0, 200, 255),
+                        MODE_CALIBRATING: (0, 255, 255),
+                    }.get(self.mode, (200, 200, 200))
+                    cv2.putText(
+                        stream_frame, f"Mode: {self.mode.upper()}", (10, 30),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.7, mode_color, 2,
+                    )
+                    cv2.putText(
+                        stream_frame,
+                        f"FPS: {self.camera.fps:.0f}  Thr: {throttle:+.2f}  Str: {steering:+.2f}",
+                        (10, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1,
+                    )
+
+                    if self._measure_line is not None:
+                        p1, p2, dist, label = self._measure_line
+                        cv2.line(stream_frame, p1, p2, (0, 255, 255), 2, cv2.LINE_AA)
+                        cv2.circle(stream_frame, p1, 6, (0, 255, 255), -1)
+                        cv2.circle(stream_frame, p2, 6, (0, 255, 255), -1)
+                        mid = ((p1[0] + p2[0]) // 2, (p1[1] + p2[1]) // 2)
+                        cv2.putText(stream_frame, label, (mid[0] + 8, mid[1] - 8),
+                                    cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2,
+                                    cv2.LINE_AA)
+
+                    if self.tracker.is_calibrating:
+                        for px, py in self.tracker._calib_points_px:
+                            px_i, py_i = int(px), int(py)
+                            if 0 <= px_i < stream_frame.shape[1] and 0 <= py_i < stream_frame.shape[0]:
+                                cv2.circle(stream_frame, (px_i, py_i), 4, (255, 255, 0), -1, cv2.LINE_AA)
+
+                    _, jpeg = cv2.imencode('.jpg', stream_frame, [cv2.IMWRITE_JPEG_QUALITY, 70])
+                    with self._jpeg_lock:
+                        self._latest_jpeg = jpeg.tobytes()
+
+                    if self.args.show_cv:
+                        cv2.imshow("Auto-Drive", stream_frame)
+                        key = cv2.waitKey(1) & 0xFF
+                        if key == ord("q"):
+                            self.running = False
+                        elif key == ord("p"):
+                            self._handle_calibration({"action": "floor_plane"})
+
+            # 9. FPS tracking
+            self._fps_count += 1
+            elapsed = now - self._fps_timer
+            if elapsed >= 1.0:
+                self._loop_fps = self._fps_count / elapsed
+                self._fps_count = 0
+                self._fps_timer = now
+
+            # No sleep — run as fast as camera provides frames
+            # The camera read() blocks naturally when no new frame is available
+
+    def _get_jpeg(self):
+        """Return latest JPEG-encoded frame for MJPEG stream."""
+        with self._jpeg_lock:
+            return self._latest_jpeg
+
+    def _process_dashboard_commands(self):
+        """Check for and process pending dashboard commands."""
+        lock = self.shared_state["lock"]
+        with lock:
+            cmd = self.shared_state.get("pending_command")
+            if cmd is None:
+                return
+            self.shared_state["pending_command"] = None
+
+        cmd_type = cmd.get("type")
+
+        if cmd_type == "mission":
+            name = cmd["name"]
+            params = cmd.get("params", {})
+            # Convert param values to float
+            params = {k: float(v) for k, v in params.items()}
+            gen = MISSION_GENERATORS.get(name)
+            if gen:
+                mission = gen(params)
+                self.follower.start_mission(mission)
+                self.mode = MODE_AUTO
+                print(f"[main] Starting mission: {name} {params}")
+                for i, wp in enumerate(mission.waypoints):
+                    print(f"  waypoint {i}: ({wp.x:.1f}, {wp.y:.1f}) heading={wp.heading}")
+            else:
+                print(f"[main] Unknown mission: {name}")
+
+        elif cmd_type == "set_mode":
+            new_mode = cmd["mode"]
+            print(f"[main] Dashboard set mode: {new_mode}")
+            self.mode = new_mode
+            if new_mode == MODE_IDLE:
+                self.follower = PathFollower()
+                self.comms.stop()
+
+        elif cmd_type == "emergency_stop":
+            print("[main] EMERGENCY STOP")
+            self.mode = MODE_IDLE
+            self.follower = PathFollower()
+            self.comms.stop()
+
+        elif cmd_type == "measure":
+            x1_px, y1_px = cmd["x1_px"], cmd["y1_px"]
+            x2_px, y2_px = cmd["x2_px"], cmd["y2_px"]
+            try:
+                x1_cm, y1_cm = self.tracker.px_to_cm(x1_px, y1_px)
+                x2_cm, y2_cm = self.tracker.px_to_cm(x2_px, y2_px)
+                dist_cm = math.hypot(x2_cm - x1_cm, y2_cm - y1_cm)
+                label = f"{dist_cm:.1f} cm"
+                self._measure_line = (
+                    (int(x1_px), int(y1_px)),
+                    (int(x2_px), int(y2_px)),
+                    dist_cm,
+                    label,
+                )
+                # Store result in shared state so dashboard can read it
+                with self.shared_state["lock"]:
+                    self.shared_state["measure_result"] = {
+                        "dist_cm": round(dist_cm, 1),
+                        "p1_cm": (round(x1_cm, 1), round(y1_cm, 1)),
+                        "p2_cm": (round(x2_cm, 1), round(y2_cm, 1)),
+                    }
+                print(f"[measure] ({x1_cm:.1f},{y1_cm:.1f}) -> ({x2_cm:.1f},{y2_cm:.1f}) = {dist_cm:.1f} cm")
+            except ValueError as e:
+                print(f"[measure] Failed: {e}")
+
+        elif cmd_type == "click_goto":
+            # Convert fractional click to pixel, then to world cm via tracker
+            frame = self.camera.read()
+            if frame is not None:
+                fh, fw = frame.shape[:2]
+                px_x = cmd["x_frac"] * fw
+                px_y = cmd["y_frac"] * fh
+                try:
+                    x_cm, y_cm = self.tracker.px_to_cm(px_x, px_y)
+                    mission = generate_goto(x_cm, y_cm)
+                    self.follower.start_mission(mission)
+                    self.mode = MODE_AUTO
+                    print(f"[main] Click goto: pixel=({px_x:.0f},{px_y:.0f}) -> ({x_cm:.1f},{y_cm:.1f})cm")
+                except ValueError as e:
+                    print(f"[main] Click goto failed: {e}")
+
+        elif cmd_type == "calibrate":
+            self._handle_calibration(cmd)
+
+    def _handle_calibration(self, cmd):
+        """Process calibration commands."""
+        import os
+        action = cmd.get("action")
+        calib_path = os.path.join(
+            os.path.dirname(os.path.abspath(__file__)), "homography.json"
+        )
+        floor_path = os.path.join(
+            os.path.dirname(os.path.abspath(__file__)), "floor_calibration.json"
+        )
+
+        if action == "floor_plane":
+            # Single-marker floor plane calibration (interactive)
+            from floor_plane import run_single_marker_calibration, run_corner_calibration
+            frame = self.camera.read()
+            if frame is None:
+                print("[calib] No camera frame available")
+                return
+            # Get camera intrinsics
+            if hasattr(self.camera, 'get_intrinsics'):
+                camera_matrix, dist_coeffs = self.camera.get_intrinsics()
+            elif hasattr(self.camera, 'intrinsics') and self.camera.intrinsics:
+                intr = self.camera.intrinsics
+                camera_matrix = np.array([
+                    [intr['fx'], 0, intr['cx']],
+                    [0, intr['fy'], intr['cy']],
+                    [0, 0, 1],
+                ], dtype=np.float64)
+                dist_coeffs = np.zeros(5, dtype=np.float64)
+            else:
+                h, w = frame.shape[:2]
+                fx = w * 0.6
+                camera_matrix = np.array([
+                    [fx, 0, w/2], [0, fx, h/2], [0, 0, 1]
+                ], dtype=np.float64)
+                dist_coeffs = np.zeros(5, dtype=np.float64)
+
+            result = run_single_marker_calibration(
+                self.camera, camera_matrix, dist_coeffs
+            )
+            if result is None:
+                print("[calib] Falling back to manual click...")
+                result = run_corner_calibration(frame, rgb_size=(frame.shape[1], frame.shape[0]))
+
+            if result is not None:
+                # Load the saved floor plane into the tracker's homography
+                self.tracker.load_floor_plane(floor_path)
+                self._floor_det = result  # for grid drawing
+                self._filtered_heading = None
+                self._filtered_x = None
+                self._filtered_y = None
+                print("[calib] Floor plane calibration applied")
+            else:
+                print("[calib] Floor plane calibration cancelled")
+
+        elif action == "drive_start":
+            self.tracker.start_calibration_drive()
+            self.mode = MODE_CALIBRATING
+            print("[main] Calibration drive started — use Xbox controller to drive")
+
+        elif action == "drive_finish":
+            success = self.tracker.finish_calibration_drive()
+            self.mode = MODE_IDLE
+            if success:
+                print("[main] Calibration drive complete — homography computed")
+                self._filtered_heading = None
+                self._filtered_x = None
+                self._filtered_y = None
+            else:
+                print("[main] Calibration drive failed — not enough points")
+
+        elif action == "charuco":
+            frame = self.camera.read()
+            if frame is not None:
+                success = self.tracker.calibrate_from_charuco(frame)
+                if success:
+                    self._filtered_heading = None
+                    self._filtered_x = None
+                    self._filtered_y = None
+                    print("[calib] ChArUco floor calibration successful")
+                else:
+                    print("[calib] ChArUco calibration failed — is the board visible?")
+            else:
+                print("[calib] No camera frame available")
+
+        elif action == "auto":
+            # Re-run auto-calibration
+            frame = self.camera.read()
+            if frame is not None:
+                success = self.tracker.auto_calibrate(frame, marker_id=self.args.marker_id)
+                if success:
+                    self._filtered_heading = None
+                    self._filtered_x = None
+                    self._filtered_y = None
+                    print("[calib] Auto-calibration successful")
+                else:
+                    print("[calib] Auto-calibration failed — marker not visible")
+
+        elif action == "capture":
+            # Capture current marker pixel position as a calibration point
+            frame = self.camera.read()
+            if frame is not None:
+                pose = self.tracker.get_robot_pose(frame, marker_id=self.args.marker_id)
+                if pose is not None:
+                    x_cm = float(cmd.get("x_cm", 0.0))
+                    y_cm = float(cmd.get("y_cm", 0.0))
+                    count = self.tracker.add_calibration_point(
+                        pose.x_px, pose.y_px, x_cm, y_cm
+                    )
+                    print(f"[calib] Point {count}: pixel=({pose.x_px:.0f},{pose.y_px:.0f}) -> world=({x_cm},{y_cm})cm")
+                else:
+                    print("[calib] No marker detected — place marker and try again")
+            else:
+                print("[calib] No camera frame available")
+
+        elif action == "compute":
+            success = self.tracker.compute_homography()
+            if success:
+                print("[calib] Homography computed successfully")
+                # Reset EMA filters since coordinate system changed
+                self._filtered_heading = None
+                self._filtered_x = None
+                self._filtered_y = None
+
+        elif action == "clear":
+            self.tracker.clear_calibration_points()
+            self.tracker._homography = None
+            self.tracker._homography_inv = None
+            print("[calib] Calibration cleared")
+
+        elif action == "save":
+            self.tracker.save_homography(calib_path)
+
+        elif action == "load":
+            if self.tracker.load_homography(calib_path):
+                self._filtered_heading = None
+                self._filtered_x = None
+                self._filtered_y = None
+
+    def _update_shared_state(self, x_cm, y_cm, heading_rad, detected, throttle, steering):
+        """Push current state to dashboard."""
+        lock = self.shared_state["lock"]
+        with lock:
+            self.shared_state["mode"] = self.mode
+            self.shared_state["x_cm"] = x_cm
+            self.shared_state["y_cm"] = y_cm
+            self.shared_state["heading_rad"] = heading_rad
+            self.shared_state["detected"] = detected
+            self.shared_state["fps"] = self.camera.fps if self.camera else 0.0
+            self.shared_state["trail"] = list(self.trail)
+            self.shared_state["px_per_cm"] = self.tracker._px_per_cm or 5.0
+            self.shared_state["origin_x"] = self.tracker._origin_x
+            self.shared_state["origin_y"] = self.tracker._origin_y
+
+            if self.follower.active:
+                self.shared_state["mission_progress"] = self.follower.mission_progress
+                self.shared_state["mission_name"] = (
+                    self.follower._mission.name if self.follower._mission else ""
+                )
+                # Build waypoint status list for dashboard
+                wps = []
+                if self.follower._mission:
+                    for i, wp in enumerate(self.follower._mission.waypoints):
+                        if i < self.follower.current_waypoint_index:
+                            status = "reached"
+                        elif i == self.follower.current_waypoint_index:
+                            status = "current"
+                        else:
+                            status = "pending"
+                        wps.append({"x": wp.x, "y": wp.y, "status": status})
+                self.shared_state["waypoints"] = wps
+            else:
+                if self.mode != MODE_AUTO:
+                    self.shared_state["mission_name"] = ""
+                    self.shared_state["mission_progress"] = 0.0
+                    self.shared_state["waypoints"] = []
+
+    def _get_waypoint_pixels(self):
+        """Convert current mission waypoints to pixel coordinates for CV overlay."""
+        if not self.follower.active or not self.follower._mission:
+            return None
+        result = []
+        for wp in self.follower._mission.waypoints:
+            try:
+                px, py = self.tracker.cm_to_px(wp.x, wp.y)
+                result.append((px, py))
+            except ValueError:
+                pass
+        return result if result else None
+
+    def _draw_floor_grid(self, frame):
+        """Draw a CRT-green perspective floor grid on the camera frame."""
+        h, w = frame.shape[:2]
+        grid_cm = 30  # 30cm grid spacing
+        grid_range = 300  # -300cm to +300cm
+        step_cm = 10  # sample every 10cm along each line for smooth curves
+
+        # CRT green palette
+        grid_color = (0, 100, 0)       # dark green grid lines
+        origin_color = (0, 200, 0)     # brighter green for axes
+        label_color = (0, 180, 0)      # green labels
+
+        def _world_polyline(world_pts):
+            """Convert world points to pixel polyline, clipping to frame bounds."""
+            px_pts = []
+            for xc, yc in world_pts:
+                try:
+                    px, py = self.tracker.cm_to_px(xc, yc)
+                    px_i, py_i = int(px), int(py)
+                    # Keep points within extended frame bounds
+                    if -500 < px_i < w + 500 and -500 < py_i < h + 500:
+                        px_pts.append((px_i, py_i))
+                    else:
+                        # Break the polyline if point goes way off
+                        if px_pts:
+                            px_pts.append(None)  # sentinel
+                except (ValueError, cv2.error):
+                    pass
+            return px_pts
+
+        def _draw_polyline(frame, px_pts, color, thickness):
+            """Draw a polyline that may have breaks (None sentinels)."""
+            for i in range(len(px_pts) - 1):
+                if px_pts[i] is not None and px_pts[i + 1] is not None:
+                    cv2.line(frame, px_pts[i], px_pts[i + 1], color, thickness,
+                             cv2.LINE_AA)
+
+        y_values = list(range(-grid_range, grid_range + 1, step_cm))
+        x_values = list(range(-grid_range, grid_range + 1, step_cm))
+
+        # Vertical lines (constant x, varying y)
+        for x_cm in range(-grid_range, grid_range + 1, grid_cm):
+            pts = [(x_cm, y) for y in y_values]
+            px_pts = _world_polyline(pts)
+            if len(px_pts) >= 2:
+                is_axis = (x_cm == 0)
+                _draw_polyline(frame, px_pts, origin_color if is_axis else grid_color,
+                               2 if is_axis else 1)
+                # Label
+                for pt in reversed(px_pts):
+                    if pt is not None and 0 <= pt[0] < w and 0 <= pt[1] < h:
+                        cv2.putText(frame, f"{x_cm}",
+                                    (pt[0] + 4, pt[1] - 4),
+                                    cv2.FONT_HERSHEY_SIMPLEX, 0.35, label_color, 1,
+                                    cv2.LINE_AA)
+                        break
+
+        # Horizontal lines (constant y, varying x)
+        for y_cm in range(-grid_range, grid_range + 1, grid_cm):
+            pts = [(x, y_cm) for x in x_values]
+            px_pts = _world_polyline(pts)
+            if len(px_pts) >= 2:
+                is_axis = (y_cm == 0)
+                _draw_polyline(frame, px_pts, origin_color if is_axis else grid_color,
+                               2 if is_axis else 1)
+                for pt in px_pts:
+                    if pt is not None and 0 <= pt[0] < w and 0 <= pt[1] < h:
+                        cv2.putText(frame, f"{y_cm}",
+                                    (pt[0] + 4, pt[1] - 4),
+                                    cv2.FONT_HERSHEY_SIMPLEX, 0.35, label_color, 1,
+                                    cv2.LINE_AA)
+                        break
+
+        # Origin crosshair
+        try:
+            ox_px, oy_px = self.tracker.cm_to_px(0.0, 0.0)
+            ox_i, oy_i = int(ox_px), int(oy_px)
+            if 0 <= ox_i < w and 0 <= oy_i < h:
+                cv2.drawMarker(frame, (ox_i, oy_i), (0, 255, 0),
+                               cv2.MARKER_CROSS, 24, 2, cv2.LINE_AA)
+                cv2.putText(frame, "ORIGIN", (ox_i + 12, oy_i - 10),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.45, (0, 255, 0), 1,
+                            cv2.LINE_AA)
+        except (ValueError, cv2.error):
+            pass
+
+        # Draw calibration sample points only during active calibration
+        if self.tracker.is_calibrating:
+            for px, py in self.tracker._calib_points_px:
+                px_i, py_i = int(px), int(py)
+                if 0 <= px_i < w and 0 <= py_i < h:
+                    cv2.circle(frame, (px_i, py_i), 4, (255, 255, 0), -1, cv2.LINE_AA)
+
+    def _shutdown(self):
+        """Clean up all resources."""
+        self.running = False
+        print("[main] Stopping motors ...")
+        self.comms.close()
+        print("[main] Stopping camera ...")
+        if self.camera:
+            self.camera.stop()
+        print("[main] Closing controller ...")
+        self.controller.close()
+        if self.args.show_cv:
+            cv2.destroyAllWindows()
+        print("[main] Done.")
+
+
+# ---------------------------------------------------------------------------
+# CLI
+# ---------------------------------------------------------------------------
+def parse_args():
+    parser = argparse.ArgumentParser(
+        description="Auto-Drive: CV-guided autonomous robot control",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog=__doc__,
+    )
+    parser.add_argument(
+        "--esp32",
+        default="",
+        help="ESP32 hostname or IP (default: dry-run mode)",
+    )
+    parser.add_argument(
+        "--udp-port",
+        type=int,
+        default=4210,
+        help="ESP32 UDP port (default: 4210)",
+    )
+    parser.add_argument(
+        "--camera",
+        type=int,
+        default=1,
+        help="Camera index (default: 1 = external webcam)",
+    )
+    parser.add_argument(
+        "--oakd",
+        action="store_true",
+        help="Use OAK-D Pro camera via DepthAI",
+    )
+    parser.add_argument(
+        "--mono",
+        action="store_true",
+        help="Use mono camera (OV9282 global shutter, up to 120fps)",
+    )
+    parser.add_argument(
+        "--fps",
+        type=float,
+        default=60.0,
+        help="Target camera FPS (default: 60, mono supports up to 130 at 800p)",
+    )
+    parser.add_argument(
+        "--marker-id",
+        type=int,
+        default=0,
+        help="ArUco marker ID for our robot (default: 0)",
+    )
+    parser.add_argument(
+        "--marker-size",
+        type=float,
+        default=50.0,
+        help="ArUco marker physical size in mm (default: 50)",
+    )
+    parser.add_argument(
+        "--port",
+        type=int,
+        default=5000,
+        help="Dashboard HTTP port (default: 5000)",
+    )
+    parser.add_argument(
+        "--show-cv",
+        action="store_true",
+        help="Show OpenCV debug window with tracking overlay",
+    )
+    parser.add_argument(
+        "--px-per-cm",
+        type=float,
+        default=5.0,
+        help="Pixels per cm calibration factor (default: 5.0 for 720p at ~2m)",
+    )
+    return parser.parse_args()
+
+
+if __name__ == "__main__":
+    args = parse_args()
+    app = AutoDriveApp(args)
+    app.start()

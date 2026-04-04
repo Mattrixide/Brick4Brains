@@ -1,15 +1,17 @@
 """Brick for Brains -- main entry point.
 
 Validates ArUco detection, color tracking, background subtraction,
-and Kalman filtering using a standard USB webcam.
+Kalman filtering, and floor plane grid using a USB webcam or OAK-D Pro.
 
 Controls:
   1 - ArUco marker detection mode
   2 - Color-based tracking mode
   3 - Background subtraction mode
   4 - Combined mode (ArUco + background subtraction)
+  5 - Floor grid mode (ArUco + floor grid overlay)
   t - Toggle trail drawing
   k - Toggle Kalman filter overlay
+  p - Calibrate floor plane (requires OAK-D Pro, arena must be empty)
   f - Cycle camera resolution (480p / 720p / 1080p)
   e - Decrease exposure (shorter = less motion blur)
   d - Increase exposure (longer = brighter but more blur)
@@ -17,20 +19,229 @@ Controls:
   g - Increase camera gain (brighter, compensates for short exposure)
   b - Decrease camera gain
   s - Toggle frame sharpening (unsharp mask)
+  i - Query and save camera capabilities to camera_profiles.json
   q / ESC - Quit
 """
 
+import json
 import math
+import os
 import time
 
 import cv2
 import numpy as np
 
-from capture import ThreadedCamera
+from capture import create_camera, DepthAICamera
 from detectors import ArUcoDetector, ColorDetector, BackgroundSubDetector
+from floor_plane import (FloorPlaneDetector, run_single_marker_calibration,
+                         run_corner_calibration)
 from kalman_tracker import KalmanTracker
 
-MODE_NAMES = {1: "ArUco", 2: "Color", 3: "Background Sub", 4: "Combined"}
+MODE_NAMES = {1: "ArUco", 2: "Color", 3: "Background Sub", 4: "Combined", 5: "Floor Grid"}
+PROFILES_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'camera_profiles.json')
+
+
+def save_camera_profile(caps):
+    """Save camera capabilities to camera_profiles.json.
+
+    Matches by device_index + backend. Replaces existing entry for the
+    same camera, appends if new.
+    """
+    profiles = []
+    if os.path.exists(PROFILES_FILE):
+        with open(PROFILES_FILE, 'r') as f:
+            profiles = json.load(f)
+
+    updated = False
+    for i, p in enumerate(profiles):
+        if (p.get('device_index') == caps['device_index'] and
+                p.get('backend') == caps['backend']):
+            profiles[i] = caps
+            updated = True
+            break
+
+    if not updated:
+        profiles.append(caps)
+
+    with open(PROFILES_FILE, 'w') as f:
+        json.dump(profiles, f, indent=2)
+
+    return PROFILES_FILE
+
+
+REPORT_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'camera_report.html')
+
+
+def generate_camera_report():
+    """Generate a standalone HTML report from camera_profiles.json."""
+    if not os.path.exists(PROFILES_FILE):
+        return
+
+    with open(PROFILES_FILE, 'r') as f:
+        profiles = json.load(f)
+
+    cards_html = []
+    for p in profiles:
+        # Resolution rows
+        res_rows = []
+        for r in p.get('supported_resolutions', []):
+            note = f' <span style="color:#999">(mapped from {r["requested"]})</span>' if r.get('requested') else ''
+            fps_str = f'{r["fps"]:.1f}' if r['fps'] > 0 else '—'
+            codec = r.get('fourcc', '—') or '—'
+            res_rows.append(
+                f'<tr><td>{r["width"]}x{r["height"]}</td><td>{codec}</td><td>{fps_str}</td><td>{note}</td></tr>'
+            )
+
+        # Property rows — skip -1 values (unsupported)
+        prop_rows = []
+        for k, v in p.get('properties', {}).items():
+            if v is None or v == -1 or v == -1.0:
+                continue
+            if isinstance(v, float) and v == int(v):
+                v = int(v)
+            prop_rows.append(f'<tr><td>{k}</td><td>{v}</td></tr>')
+
+        ts = p.get('timestamp', 'Unknown')
+        codecs = ', '.join(p.get('supported_codecs', [])) or 'unknown'
+        cur_res = p.get('current_resolution', [0, 0])
+        cards_html.append(f'''
+    <div class="cam-card">
+      <h2>Camera {p.get('device_index', '?')} &mdash; {p.get('backend', '?')}</h2>
+      <p class="timestamp">Last queried: {ts}</p>
+      <p class="timestamp">Current resolution: {cur_res[0]}x{cur_res[1]} &bull; Supported codecs: {codecs}</p>
+      <h3>Supported Resolutions</h3>
+      <table>
+        <thead><tr><th>Resolution</th><th>Codec</th><th>Measured FPS</th><th>Notes</th></tr></thead>
+        <tbody>{''.join(res_rows)}</tbody>
+      </table>
+      <h3>Properties</h3>
+      <table>
+        <thead><tr><th>Property</th><th>Value</th></tr></thead>
+        <tbody>{''.join(prop_rows)}</tbody>
+      </table>
+    </div>''')
+
+    html = f'''<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Camera Profiles &mdash; Brick for Brains</title>
+  <style>
+    * {{ box-sizing: border-box; margin: 0; padding: 0; }}
+    body {{
+      font-family: 'Segoe UI', system-ui, sans-serif;
+      background: #f4f6f9;
+      color: #202124;
+      line-height: 1.6;
+      padding: 32px;
+      max-width: 960px;
+      margin: 0 auto;
+    }}
+    h1 {{
+      font-size: 1.5rem;
+      margin-bottom: 4px;
+    }}
+    .subtitle {{
+      font-size: .875rem;
+      color: #5f6368;
+      margin-bottom: 24px;
+    }}
+    .cam-card {{
+      background: #fff;
+      border: 1px solid #e8eaed;
+      border-left: 4px solid #1a73e8;
+      border-radius: 8px;
+      padding: 24px;
+      margin-bottom: 20px;
+      box-shadow: 0 1px 3px rgba(0,0,0,.08);
+    }}
+    .cam-card h2 {{
+      font-size: 1.125rem;
+      margin-bottom: 4px;
+    }}
+    .cam-card h3 {{
+      font-size: .8125rem;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: .06em;
+      color: #5f6368;
+      margin: 16px 0 8px;
+    }}
+    .timestamp {{
+      font-size: .8125rem;
+      color: #5f6368;
+      margin-bottom: 12px;
+    }}
+    table {{
+      width: 100%;
+      border-collapse: collapse;
+      font-size: .875rem;
+      margin-bottom: 8px;
+    }}
+    thead th {{
+      background: #f4f6f9;
+      border-bottom: 2px solid #dadce0;
+      padding: 8px 12px;
+      text-align: left;
+      font-weight: 600;
+    }}
+    tbody td {{
+      padding: 6px 12px;
+      border-bottom: 1px solid #e8eaed;
+    }}
+    tbody tr:hover {{ background: #e8f0fe; }}
+    .count {{
+      font-size: .875rem;
+      color: #5f6368;
+      margin-bottom: 20px;
+    }}
+    a {{ color: #1a73e8; }}
+  </style>
+</head>
+<body>
+  <h1>Camera Profiles</h1>
+  <p class="subtitle">Generated by cv-tracking prototype &mdash; press <kbd>i</kbd> to query a camera</p>
+  <p class="count">{len(profiles)} camera(s) profiled</p>
+{''.join(cards_html)}
+  <p style="margin-top:24px;font-size:.8125rem;color:#5f6368;">
+    <a href="camera_profiles.json">Raw JSON data</a> &mdash;
+    <a href="../../dashboard/prototypes.html">Back to Prototypes</a>
+  </p>
+</body>
+</html>'''
+
+    with open(REPORT_FILE, 'w') as f:
+        f.write(html)
+
+    return REPORT_FILE
+
+
+def print_capabilities(caps):
+    """Print camera capabilities to console."""
+    print(f"\n{'=' * 50}")
+    print(f"  Camera {caps['device_index']} - {caps['backend']}")
+    print(f"  Queried: {caps['timestamp']}")
+    print(f"{'=' * 50}")
+
+    codecs = ', '.join(caps.get('supported_codecs', [])) or 'unknown'
+    print(f"\n  Supported codecs: {codecs}")
+    print(f"\n  Supported Resolutions:")
+    print(f"    {'Resolution':<12} {'Codec':<6} {'FPS':>8}")
+    print(f"    {'-'*12} {'-'*6} {'-'*8}")
+    for r in caps['supported_resolutions']:
+        note = f"  (from {r['requested']})" if r.get('requested') else ""
+        codec = r.get('fourcc', '?') or '?'
+        print(f"    {r['width']:>4}x{r['height']:<4}   {codec:<6} {r['fps']:>5.1f} FPS{note}")
+
+    print(f"\n  Properties:")
+    for k, v in caps['properties'].items():
+        if v is not None:
+            if isinstance(v, float) and v == int(v):
+                v = int(v)
+            print(f"    {k:<20} {v}")
+
+    print(f"{'=' * 50}\n")
 
 
 class ChaserBot:
@@ -175,8 +386,8 @@ class ChaserBot:
 
 
 def main():
-    # Initialize camera
-    cam = ThreadedCamera(src=0, resolution_index=0).start()
+    # Initialize camera (auto-detect OAK-D, fall back to webcam at 720p)
+    cam = create_camera(src=0, resolution_index=1, backend=cv2.CAP_DSHOW).start()
     # Let camera warm up
     time.sleep(0.5)
 
@@ -188,6 +399,9 @@ def main():
     # Kalman trackers -- one per tracked "slot"
     kalman_primary = KalmanTracker()    # "our robot" or primary tracked object
     kalman_secondary = KalmanTracker()  # "enemy" in combined mode
+
+    # Floor plane detector (loads saved calibration if available)
+    floor_det = FloorPlaneDetector()
 
     # Simulated chaser bot
     chaser = ChaserBot()
@@ -203,8 +417,13 @@ def main():
     num_cameras = 2  # Camera 0 = built-in, Camera 1 = Logitech C270
 
     print("Brick for Brains")
-    print("Controls: 1=ArUco  2=Color  3=BGSub  4=Combined  t=trail  k=kalman  f=resolution")
-    print("          e/d=exposure-/+  a=auto-exposure  g/b=gain+/-  s=sharpen  c=camera  q=quit")
+    print("Controls: 1=ArUco  2=Color  3=BGSub  4=Combined  5=FloorGrid")
+    print("          t=trail  k=kalman  p=calibrate floor (marker ID 10 on floor + click)")
+    print("          f=resolution")
+    print("          e/d=exposure-/+  a=auto-exposure  g/b=gain+/-  s=sharpen  c=camera")
+    print("          i=camera info  q=quit")
+    if floor_det.calibrated:
+        print("Floor calibration loaded. Press '5' for grid mode.")
 
     while True:
         frame = cam.read()
@@ -243,6 +462,13 @@ def main():
                         filtered.append(det)
                 detections_secondary = filtered
             bgsub_det.draw(frame, detections_secondary)
+        elif mode == 5:
+            # Floor grid mode: ArUco detection + floor grid overlay
+            detections_primary = aruco_det.detect_and_draw(frame)
+            floor_det.draw_grid(frame)
+            # Show world coordinates for each detection
+            for det in detections_primary:
+                floor_det.draw_world_position(frame, det)
 
         # --- Kalman filter ---
         if show_kalman:
@@ -294,6 +520,7 @@ def main():
             f"Exposure: {exp_label} | Gain: {cam.gain}",
             f"Trail: {'ON' if show_trail else 'OFF'} | Kalman: {'ON' if show_kalman else 'OFF'}"
             f" | Sharpen: {'ON' if cam.sharpen_enabled else 'OFF'}",
+            f"Floor: {'CALIBRATED' if floor_det.calibrated else 'not calibrated (press p)'}",
         ]
         for i, line in enumerate(hud_lines):
             y = 22 + i * 22
@@ -332,6 +559,33 @@ def main():
             mode = 4
             kalman_primary.reset()
             kalman_secondary.reset()
+        elif key == ord('5'):
+            if floor_det.calibrated:
+                mode = 5
+                kalman_primary.reset()
+            else:
+                print("Floor not calibrated. Press 'p' to calibrate first.")
+        elif key == ord('p'):
+            # Floor plane calibration
+            # Try: single marker pose -> 4-corner ArUco -> manual click
+            if frame is not None:
+                camera_matrix, dist_coeffs = cam.get_intrinsics()
+                result = run_single_marker_calibration(
+                    cam, camera_matrix, dist_coeffs
+                )
+                if result is None:
+                    print("Trying 4-corner ArUco (IDs 0-3)...")
+                    test_det = FloorPlaneDetector()
+                    if test_det.calibrate_from_aruco(frame):
+                        result = test_det
+                if result is None:
+                    print("Falling back to manual click...")
+                    result = run_corner_calibration(frame, rgb_size=cam.resolution)
+                if result is not None:
+                    floor_det = result
+                    print("Calibration successful! Press '5' for grid mode.")
+                else:
+                    print("Calibration cancelled.")
         elif key == ord('t'):
             show_trail = not show_trail
         elif key == ord('k'):
@@ -360,16 +614,27 @@ def main():
         elif key == ord('s'):
             sharpening = cam.toggle_sharpen()
             print(f"Sharpening: {'ON' if sharpening else 'OFF'}")
+        elif key == ord('i'):
+            print("\nQuerying camera capabilities (brief pause)...")
+            caps = cam.get_capabilities()
+            print_capabilities(caps)
+            path = save_camera_profile(caps)
+            report = generate_camera_report()
+            print(f"Saved to {path}")
+            print(f"Report: {report}")
         elif key == ord('c'):
-            new_idx = (cam.camera_index + 1) % num_cameras
-            print(f"Switching to camera {new_idx}...")
-            if cam.switch_camera(new_idx):
-                print(f"Camera {new_idx}: {cam.resolution[0]}x{cam.resolution[1]}")
-                kalman_primary.reset()
-                kalman_secondary.reset()
-                chaser.initialized = False
+            if not isinstance(cam.camera_index, int):
+                print(f"Camera switching not available for {cam.camera_index}")
             else:
-                print(f"Camera {new_idx} failed, staying on camera {cam.camera_index}")
+                new_idx = (cam.camera_index + 1) % num_cameras
+                print(f"Switching to camera {new_idx}...")
+                if cam.switch_camera(new_idx):
+                    print(f"Camera {new_idx}: {cam.resolution[0]}x{cam.resolution[1]}")
+                    kalman_primary.reset()
+                    kalman_secondary.reset()
+                    chaser.initialized = False
+                else:
+                    print(f"Camera {new_idx} failed, staying on camera {cam.camera_index}")
 
     cam.stop()
     cv2.destroyAllWindows()

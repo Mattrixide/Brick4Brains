@@ -25,15 +25,32 @@ class Detection:
 class ArUcoDetector:
     """Detect ArUco 4x4_50 markers with heading estimation."""
 
-    def __init__(self):
+    def __init__(self, use_clahe=True):
         dictionary = cv2.aruco.getPredefinedDictionary(cv2.aruco.DICT_4X4_50)
         params = cv2.aruco.DetectorParameters()
-        # Speed optimizations
+
+        # Adaptive thresholding -- tuned for 50mm markers at 1.5-3m, 720p
+        params.adaptiveThreshWinSizeMin = 3
+        params.adaptiveThreshWinSizeMax = 15   # reduced from 23 (fewer passes)
+        params.adaptiveThreshWinSizeStep = 6   # 3 passes: 3, 9, 15
+
+        # Marker size constraints -- reject false candidates early
+        params.minMarkerPerimeterRate = 0.04   # ~51px perimeter (~13px/side)
+        params.maxMarkerPerimeterRate = 4.0    # OpenCV default — allow large markers during prototyping
+
+        # Corner refinement disabled for speed
         params.cornerRefinementMethod = cv2.aruco.CORNER_REFINE_NONE
+
         self._detector = cv2.aruco.ArucoDetector(dictionary, params)
+
+        # CLAHE for normalizing uneven arena lighting (~1-2ms cost)
+        self._use_clahe = use_clahe
+        self._clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
 
     def detect(self, frame):
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        if self._use_clahe:
+            gray = self._clahe.apply(gray)
         corners, ids, _ = self._detector.detectMarkers(gray)
         detections = []
         if ids is None:
@@ -79,6 +96,8 @@ class ArUcoDetector:
     def detect_and_draw(self, frame):
         """Detect markers and draw overlays. Returns detections."""
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        if self._use_clahe:
+            gray = self._clahe.apply(gray)
         corners, ids, _ = self._detector.detectMarkers(gray)
         detections = []
         if ids is not None:

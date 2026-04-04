@@ -2,3 +2,20 @@ __pycache__/
 *.pyc
 *.pyo
 .env
+credentials.h
+
+# Calibration data (machine-specific)
+**/floor_calibration.json
+**/homography.json
+**/camera_profiles.json
+
+# PlatformIO build artifacts
+.pio/
+.vscode/
+
+# Generated images
+*.png
+
+# Benchmark/profiling output
+fps_test_log.csv
+camera_report.html

@@ -19,6 +19,70 @@ import time
 # Telemetry receiver (background thread)
 # ---------------------------------------------------------------------------
 
+class IMUPoller:
+    """Polls ESP32 /api/imu via HTTP in a background thread (~20 Hz)."""
+
+    def __init__(self, host="192.168.4.113"):
+        self._url = f"http://{host}/api/imu"
+        self._thread = None
+        self._running = False
+        self._lock = threading.Lock()
+
+        self.yaw = 0.0
+        self.pitch = 0.0
+        self.roll = 0.0
+        self.ready = False
+        self.last_recv_time = 0.0
+        self.polls = 0
+
+    def start(self):
+        self._running = True
+        self._thread = threading.Thread(target=self._poll_loop, daemon=True)
+        self._thread.start()
+        print(f"[imu-poll] Polling {self._url}")
+
+    def _poll_loop(self):
+        import requests
+        while self._running:
+            try:
+                r = requests.get(self._url, timeout=0.3)
+                data = r.json()
+                with self._lock:
+                    self.yaw = data.get("yaw", 0.0)
+                    self.pitch = data.get("pitch", 0.0)
+                    self.roll = data.get("roll", 0.0)
+                    self.ready = data.get("ready", False)
+                    self.last_recv_time = time.monotonic()
+                    self.polls += 1
+            except Exception:
+                pass
+            time.sleep(0.04)  # ~25 Hz
+
+    @property
+    def is_active(self):
+        with self._lock:
+            if self.last_recv_time == 0:
+                return False
+            return (time.monotonic() - self.last_recv_time) < 1.0
+
+    def get_yaw(self):
+        with self._lock:
+            return self.yaw
+
+    def stop(self):
+        self._running = False
+        if self._thread:
+            self._thread.join(timeout=1.0)
+
+    def reset_yaw(self):
+        """Send reset yaw command to ESP32."""
+        import requests
+        try:
+            requests.post(self._url, data={"resetYaw": "1"}, timeout=0.5)
+        except Exception:
+            pass
+
+
 class TelemetryReceiver:
     """Receives IMU telemetry from ESP32 on UDP port 4211.
 
@@ -117,58 +181,76 @@ class TelemetryReceiver:
 # ---------------------------------------------------------------------------
 
 class HeadingFusion:
-    """Fuses CV heading (absolute, slow) with gyro heading (fast, drifts).
+    """Fuses CV heading (absolute, slow) with IMU yaw (fast, drifts).
 
-    When CV is available:  CV is ground truth, gyro fills gaps between frames.
-    When CV is lost:       Gyro-only integration.
-    When CV re-acquired:   Instant snap to CV heading (no gradual blend).
+    Uses IMU yaw from ESP32 /api/imu with offset calibration against ArUco.
+    When CV is available:  Calibrate offset, output = IMU yaw - offset
+    When CV is lost:       IMU-only heading (drifts slowly but stable at speed)
+    When CV re-acquired:   Instant recalibrate offset
     """
 
     def __init__(self):
-        self.heading_deg = 0.0         # fused heading output
-        self._gyro_heading_deg = 0.0   # accumulated gyro heading
-        self._cv_heading_deg = None    # last CV heading
+        self.heading_deg = 0.0         # fused heading output (degrees)
+        self._imu_yaw_deg = 0.0        # raw IMU yaw from ESP32
+        self._offset_deg = 0.0         # IMU_yaw - ArUco_heading offset
+        self._offset_calibrated = False
+        self._cv_heading_deg = None
         self._frames_without_cv = 0
         self._has_cv = False
-        self._last_gyro_time = 0.0
+
+    def update_imu(self, imu_yaw_deg: float):
+        """Called with raw IMU yaw from ESP32 (~20 Hz via HTTP polling).
+
+        If offset is calibrated, updates fused heading.
+        """
+        self._imu_yaw_deg = imu_yaw_deg
+        if self._offset_calibrated:
+            self.heading_deg = imu_yaw_deg - self._offset_deg
 
     def update_gyro(self, gyro_z_dps: float, dt: float):
-        """Called at IMU telemetry rate (~100 Hz from ESP32).
+        """Called at IMU telemetry rate (UDP, if available).
 
-        Integrates gyro into heading between CV frames.
+        Fallback if HTTP polling isn't fast enough.
         """
-        self._gyro_heading_deg += gyro_z_dps * dt
-        self.heading_deg = self._gyro_heading_deg
+        self._imu_yaw_deg += gyro_z_dps * dt
+        if self._offset_calibrated:
+            self.heading_deg = self._imu_yaw_deg - self._offset_deg
 
     def update_cv(self, cv_heading_rad: float):
         """Called when ArUco is detected (~30 Hz).
 
-        Instant snap: reset gyro heading to match CV.
+        Calibrates the offset between IMU yaw and ArUco heading.
         """
         cv_deg = math.degrees(cv_heading_rad)
         self._cv_heading_deg = cv_deg
         self._has_cv = True
-
-        # INSTANT SNAP — trust CV absolutely
-        self._gyro_heading_deg = cv_deg
-        self.heading_deg = cv_deg
         self._frames_without_cv = 0
+
+        # Calibrate offset: offset = IMU_yaw - ArUco_heading
+        self._offset_deg = self._imu_yaw_deg - cv_deg
+        self._offset_calibrated = True
+        self.heading_deg = cv_deg  # snap to CV
 
     def update_no_cv(self):
         """Called when ArUco detection fails this frame."""
         self._frames_without_cv += 1
         self._has_cv = False
-        # heading continues from gyro integration
+        # heading continues from IMU with last calibrated offset
 
     @property
     def heading_rad(self) -> float:
-        """Fused heading in radians."""
-        return math.radians(self.heading_deg)
+        """Fused heading in radians, normalized to [-pi, pi]."""
+        rad = math.radians(self.heading_deg)
+        return math.atan2(math.sin(rad), math.cos(rad))
 
     @property
     def is_cv_tracking(self) -> bool:
         """True if CV heading was available recently."""
         return self._frames_without_cv < 5
+
+    @property
+    def is_calibrated(self) -> bool:
+        return self._offset_calibrated
 
     @property
     def frames_without_cv(self) -> int:
@@ -177,6 +259,8 @@ class HeadingFusion:
     @property
     def confidence(self) -> float:
         """1.0 when CV is fresh, decays with gyro-only time."""
+        if not self._offset_calibrated:
+            return 0.0
         if self._frames_without_cv == 0:
             return 1.0
         return max(0.0, 1.0 - self._frames_without_cv * 0.01)

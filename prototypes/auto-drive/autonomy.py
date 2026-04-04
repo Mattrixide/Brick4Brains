@@ -357,12 +357,10 @@ class IMUAssistedPathFollower(PathFollower):
         self._phase = self.PHASE_TURN
 
     def _use_imu_turn(self) -> bool:
-        """Check if IMU-assisted turning is available.
-
-        Disabled until ESP32 firmware supports 8-byte turn packets.
-        Falls back to base PathFollower (vision-only PID steering).
-        """
-        return False
+        """Check if IMU-assisted turning is available."""
+        return (self._comms is not None and
+                hasattr(self._comms, 'send_turn') and
+                not self._comms._dry_run)
 
     def update(
         self, x_cm: float, y_cm: float, heading_rad: float, dt: float

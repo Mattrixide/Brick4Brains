@@ -34,7 +34,7 @@ from autonomy import (
     generate_goto,
 )
 from dashboard_server import DashboardServer, create_shared_state
-from sensor_fusion import HeadingFusion, TelemetryReceiver
+from sensor_fusion import HeadingFusion, TelemetryReceiver, IMUPoller
 from enemy_tracker import EnemyTracker
 from intercept import (
     compute_intercept_point,
@@ -107,6 +107,7 @@ class AutoDriveApp:
         # IMU sensor fusion + telemetry
         self._heading_fusion = HeadingFusion()
         self._telemetry = TelemetryReceiver(port=4211)
+        self._imu_poller = None  # started later if ESP32 is connected
         self._last_telemetry_time = 0.0
 
         # Enemy tracking + interception
@@ -229,6 +230,12 @@ class AutoDriveApp:
         # Start IMU telemetry receiver
         self._telemetry.start()
 
+        # Start IMU HTTP poller if ESP32 is connected
+        if args.esp32:
+            esp32_ip = self.comms._addr[0] if self.comms._addr else args.esp32
+            self._imu_poller = IMUPoller(host=esp32_ip)
+            self._imu_poller.start()
+
         # Upgrade to IMU-assisted follower if ESP32 is connected
         if args.esp32:
             self.follower = IMUAssistedPathFollower(
@@ -297,12 +304,12 @@ class AutoDriveApp:
             if frame is not None:
                 pose = self.tracker.get_robot_pose(frame, marker_id=self.args.marker_id)
 
-            # 1b. Update sensor fusion with IMU telemetry
-            if self._telemetry.is_active:
+            # 1b. Update sensor fusion with IMU
+            if self._imu_poller and self._imu_poller.is_active:
+                self._heading_fusion.update_imu(self._imu_poller.get_yaw())
+            elif self._telemetry.is_active:
                 tel = self._telemetry.get()
-                self._heading_fusion.update_gyro(
-                    tel["gyro_z"], dt
-                )
+                self._heading_fusion.update_gyro(tel["gyro_z"], dt)
 
             # 2. Convert to world coordinates + EMA filter
             x_cm, y_cm, heading_rad = 0.0, 0.0, 0.0
@@ -446,9 +453,12 @@ class AutoDriveApp:
                     desired_heading = math.atan2(
                         enemy_pos[1] - y_cm, enemy_pos[0] - x_cm
                     )
-                    # Normalize heading to [-pi, pi] before computing error
-                    norm_heading = math.atan2(math.sin(heading_rad), math.cos(heading_rad))
-                    heading_error = angle_diff(desired_heading, norm_heading)
+                    # Use IMU-fused heading if calibrated (stable during fast turns)
+                    if self._heading_fusion.is_calibrated:
+                        use_heading = self._heading_fusion.heading_rad
+                    else:
+                        use_heading = math.atan2(math.sin(heading_rad), math.cos(heading_rad))
+                    heading_error = angle_diff(desired_heading, use_heading)
                     turn_threshold = 0.35  # ~20 degrees
 
                     if state == PursuitState.LOST:
@@ -458,22 +468,32 @@ class AutoDriveApp:
                         throttle = 0.0
                         steering = 0.0
                     elif abs(heading_error) > turn_threshold:
-                        # TURN: proportional with high gain, clamped
-                        # Full power for large errors, proportional for small
+                        # TURN: send to ESP32 gyro turn (executes at 104Hz on-board)
                         throttle = 0.0
-                        if abs(heading_error) > 1.5:  # >86 degrees — full speed spin
-                            steering = 0.8 if heading_error > 0 else -0.8
+                        steering = 0.0
+                        if hasattr(self.comms, 'send_turn') and not self.comms._dry_run:
+                            self.comms.send_turn(math.degrees(heading_error))
                         else:
-                            steering = max(-0.8, min(0.8, heading_error * 0.6))
+                            # Fallback: direct steering
+                            if abs(heading_error) > 1.5:
+                                steering = 0.8 if heading_error > 0 else -0.8
+                            else:
+                                steering = max(-0.8, min(0.8, heading_error * 0.6))
                     else:
-                        # DRIVE: full speed toward enemy with proportional steering
+                        # DRIVE: speed proportional to distance, gentle steering
                         if distance < 10.0:
                             throttle = 0.0
                             steering = 0.0
+                        elif distance < 40.0:
+                            # Close approach — slow down
+                            throttle = 0.3 + 0.4 * (distance / 40.0)
+                            steering = heading_error * 0.3
+                            steering = max(-0.3, min(0.3, steering))
                         else:
-                            throttle = min(1.0, distance / 20.0)
-                            steering = heading_error * 1.0  # proportional correction while driving
-                            steering = max(-0.5, min(0.5, steering))  # cap so we don't spin
+                            # Far — full speed, moderate correction
+                            throttle = min(0.8, distance / 60.0)
+                            steering = heading_error * 0.5
+                            steering = max(-0.4, min(0.4, steering))
 
                     # Debug log at 2Hz
                     if not hasattr(self, '_intercept_log_t'):
@@ -481,8 +501,9 @@ class AutoDriveApp:
                     if now - self._intercept_log_t > 0.5:
                         self._intercept_log_t = now
                         phase = "TURN" if abs(heading_error) > turn_threshold else "DRIVE"
+                        src = "IMU" if self._heading_fusion.is_calibrated else "CV"
                         print(f"[intercept] {state} {phase} | "
-                              f"robot=({x_cm:.0f},{y_cm:.0f}) hdg={math.degrees(heading_rad):.0f}° | "
+                              f"robot=({x_cm:.0f},{y_cm:.0f}) hdg={math.degrees(use_heading):.0f}°[{src}] | "
                               f"enemy=({enemy_pos[0]:.0f},{enemy_pos[1]:.0f}) | "
                               f"dist={distance:.0f}cm herr={math.degrees(heading_error):.0f}° | "
                               f"thr={throttle:.2f} str={steering:.2f}")
@@ -1083,6 +1104,8 @@ class AutoDriveApp:
         self.comms.close()
         print("[main] Stopping telemetry ...")
         self._telemetry.stop()
+        if self._imu_poller:
+            self._imu_poller.stop()
         print("[main] Stopping camera ...")
         if self.camera:
             self.camera.stop()

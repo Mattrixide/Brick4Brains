@@ -26,6 +26,7 @@ from comms import RobotComms
 from controller import XboxController
 from autonomy import (
     PathFollower,
+    IMUAssistedPathFollower,
     get_available_missions,
     generate_square,
     generate_forward_back,
@@ -33,6 +34,16 @@ from autonomy import (
     generate_goto,
 )
 from dashboard_server import DashboardServer, create_shared_state
+from sensor_fusion import HeadingFusion, TelemetryReceiver
+from enemy_tracker import EnemyTracker
+from intercept import (
+    compute_intercept_point,
+    proportional_navigation,
+    pure_pursuit,
+    SmoothedIntercept,
+    PursuitFSM,
+    PursuitState,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -42,6 +53,7 @@ MODE_IDLE = "idle"
 MODE_AUTO = "auto"
 MODE_MANUAL = "manual"
 MODE_CALIBRATING = "calibrating"
+MODE_INTERCEPT = "intercept"
 
 
 # ---------------------------------------------------------------------------
@@ -91,6 +103,22 @@ class AutoDriveApp:
         self._filtered_heading = None
         self._filtered_x = None
         self._filtered_y = None
+
+        # IMU sensor fusion + telemetry
+        self._heading_fusion = HeadingFusion()
+        self._telemetry = TelemetryReceiver(port=4211)
+        self._last_telemetry_time = 0.0
+
+        # Enemy tracking + interception
+        self._enemy_tracker = EnemyTracker(dt=1/60, sigma_a=5.0, sigma_meas_cm=1.0)
+        self._pursuit_fsm = PursuitFSM()
+        self._smoothed_intercept = SmoothedIntercept(alpha=0.3)
+        self._our_velocity = (0.0, 0.0)  # estimated from position changes
+        self._prev_pos = None
+        self._our_max_speed_cm_s = 50.0  # tune based on robot capability
+
+        # Click-to-point state
+        self._click_target_px = None
 
         # Measurement overlay (persists on frame until cleared)
         self._measure_line = None  # ((x1_px,y1_px), (x2_px,y2_px), dist_cm, label)
@@ -180,6 +208,18 @@ class AutoDriveApp:
         elif os.path.exists(legacy_path):
             self.tracker.load_homography(legacy_path)
 
+        # Start IMU telemetry receiver
+        self._telemetry.start()
+
+        # Upgrade to IMU-assisted follower if ESP32 is connected
+        if args.esp32:
+            self.follower = IMUAssistedPathFollower(
+                comms=self.comms,
+                sensor_fusion=self._heading_fusion,
+                telemetry=self._telemetry,
+            )
+            print("[main] IMU-assisted path follower enabled")
+
         # Start dashboard with video feed callback
         self._latest_jpeg = None
         self._jpeg_lock = threading.Lock()
@@ -190,6 +230,7 @@ class AutoDriveApp:
         print(f"\n[main] Ready — mode: {self.mode.upper()}")
         if self.args.show_cv:
             print("[main] Press 'q' in CV window to quit")
+            print("[main] Click on CV window to set goto target")
         print("[main] Press Ctrl+C to stop\n")
 
         # Main loop
@@ -238,6 +279,13 @@ class AutoDriveApp:
             if frame is not None:
                 pose = self.tracker.get_robot_pose(frame, marker_id=self.args.marker_id)
 
+            # 1b. Update sensor fusion with IMU telemetry
+            if self._telemetry.is_active:
+                tel = self._telemetry.get()
+                self._heading_fusion.update_gyro(
+                    tel["gyro_z"], dt
+                )
+
             # 2. Convert to world coordinates + EMA filter
             x_cm, y_cm, heading_rad = 0.0, 0.0, 0.0
             detected = False
@@ -276,6 +324,27 @@ class AutoDriveApp:
                 y_cm = self._filtered_y
                 heading_rad = self._filtered_heading
                 self.trail.append((x_cm, y_cm))
+
+                # Update sensor fusion with CV heading
+                self._heading_fusion.update_cv(heading_rad)
+
+                # Estimate our velocity from position changes
+                if self._prev_pos is not None:
+                    vx = (x_cm - self._prev_pos[0]) / max(dt, 0.001)
+                    vy = (y_cm - self._prev_pos[1]) / max(dt, 0.001)
+                    self._our_velocity = (vx, vy)
+                self._prev_pos = (x_cm, y_cm)
+
+            if pose is None and detected is False:
+                self._heading_fusion.update_no_cv()
+
+            # 2b. Enemy tracking (run every frame)
+            if frame is not None:
+                our_corners = pose.corners if pose is not None else None
+                self._enemy_tracker.update(
+                    frame, our_corners,
+                    px_to_cm=self.tracker.px_to_cm
+                )
 
             # 3. Read controller
             ctrl = self.controller.read()
@@ -330,6 +399,65 @@ class AutoDriveApp:
                     with self.shared_state["lock"]:
                         self.shared_state["calib_points"] = total
 
+            elif self.mode == MODE_INTERCEPT:
+                # Check for controller override
+                override = (abs(ctrl.throttle) > 0.25 or
+                            abs(ctrl.steering) > 0.25 or
+                            ctrl.buttons != 0)
+                if override:
+                    print("[main] Xbox override — switching to MANUAL")
+                    self.mode = MODE_MANUAL
+                    self._pursuit_fsm.reset()
+                    throttle = ctrl.throttle
+                    steering = ctrl.steering
+                elif detected and self._enemy_tracker.is_tracking:
+                    enemy_pos = self._enemy_tracker.position_cm
+                    enemy_vel = self._enemy_tracker.velocity_cm_s
+                    our_pos = (x_cm, y_cm)
+                    distance = math.hypot(enemy_pos[0] - x_cm, enemy_pos[1] - y_cm)
+
+                    state = self._pursuit_fsm.update_with_distance(
+                        self._enemy_tracker.enemy_detected,
+                        self._enemy_tracker.is_tracking,
+                        self._enemy_tracker.kalman.frames_without_detection,
+                        distance,
+                    )
+
+                    if state == PursuitState.INTERCEPT:
+                        # Proportional Navigation
+                        throttle, steering = proportional_navigation(
+                            our_pos, self._our_velocity,
+                            enemy_pos, enemy_vel,
+                            N=4.0, max_omega=10.0,
+                        )
+                    elif state == PursuitState.CLOSE:
+                        # Pure pursuit at max speed
+                        throttle, steering = pure_pursuit(
+                            our_pos, heading_rad, enemy_pos
+                        )
+                        throttle = 1.0  # full speed
+                    elif state == PursuitState.ACQUIRE:
+                        # Steer toward enemy while building velocity estimate
+                        throttle, steering = pure_pursuit(
+                            our_pos, heading_rad, enemy_pos
+                        )
+                        throttle *= 0.5  # half speed during acquire
+                    elif state == PursuitState.LOST:
+                        # Coast toward last predicted position
+                        pred_pos = self._enemy_tracker.position_cm
+                        throttle, steering = pure_pursuit(
+                            our_pos, heading_rad, pred_pos
+                        )
+                        throttle *= 0.3
+                    else:
+                        # SEARCH — spin slowly
+                        throttle = 0.0
+                        steering = 0.3
+                elif not self._enemy_tracker.is_tracking:
+                    # Lost enemy completely — spin to search
+                    throttle = 0.0
+                    steering = 0.3
+
             elif self.mode == MODE_IDLE:
                 # Check for controller override — require deliberate input
                 override = (abs(ctrl.throttle) > 0.25 or
@@ -342,7 +470,14 @@ class AutoDriveApp:
                     steering = ctrl.steering
                     buttons = ctrl.buttons
 
-            # 6. Apply mix + dead zone boost (only in AUTO mode)
+            # 6. Apply mix + dead zone boost (AUTO and INTERCEPT modes)
+            if self.mode in (MODE_AUTO, MODE_INTERCEPT):
+                # ESP32 has invertThrottle=-1 and invertSteering=-1
+                # (tuned for Xbox controller). Autonomy sends positive=forward,
+                # so we negate to match the ESP32's inversion.
+                throttle = -throttle
+                steering = -steering
+
             if self.mode == MODE_AUTO:
                 with self.shared_state["lock"]:
                     t_mix = self.shared_state.get("throttle_mix", 0.6)
@@ -414,6 +549,7 @@ class AutoDriveApp:
                         MODE_AUTO: (0, 255, 0),
                         MODE_MANUAL: (0, 200, 255),
                         MODE_CALIBRATING: (0, 255, 255),
+                        MODE_INTERCEPT: (0, 0, 255),
                     }.get(self.mode, (200, 200, 200))
                     cv2.putText(
                         stream_frame, f"Mode: {self.mode.upper()}", (10, 30),
@@ -445,13 +581,49 @@ class AutoDriveApp:
                     with self._jpeg_lock:
                         self._latest_jpeg = jpeg.tobytes()
 
+                    # Draw enemy tracking overlay
+                    if self._enemy_tracker.is_tracking or self._enemy_tracker.enemy_detected:
+                        self._enemy_tracker.draw_overlay(
+                            stream_frame,
+                            cm_to_px=self.tracker.cm_to_px,
+                        )
+                        # Draw pursuit state
+                        state_text = f"Pursuit: {self._pursuit_fsm.state.upper()}"
+                        cv2.putText(stream_frame, state_text, (10, 90),
+                                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 200, 255), 1)
+
+                    # Draw IMU fusion status
+                    if self._telemetry.is_active:
+                        tel = self._telemetry.get()
+                        imu_text = f"IMU: {tel['heading']:.1f}deg gyro:{tel['gyro_z']:.1f}dps"
+                        cv2.putText(stream_frame, imu_text, (10, 110),
+                                    cv2.FONT_HERSHEY_SIMPLEX, 0.4, (200, 200, 0), 1)
+
                     if self.args.show_cv:
                         cv2.imshow("Auto-Drive", stream_frame)
+
+                        # Register click callback (once)
+                        if not hasattr(self, '_cv_callback_set'):
+                            cv2.setMouseCallback("Auto-Drive", self._on_cv_click)
+                            self._cv_callback_set = True
+
                         key = cv2.waitKey(1) & 0xFF
                         if key == ord("q"):
                             self.running = False
                         elif key == ord("p"):
                             self._handle_calibration({"action": "floor_plane"})
+                        elif key == ord("i"):
+                            # Toggle intercept mode
+                            if self.mode == MODE_INTERCEPT:
+                                self.mode = MODE_IDLE
+                                self._pursuit_fsm.reset()
+                                self.comms.stop()
+                                print("[main] Intercept mode OFF")
+                            else:
+                                self.mode = MODE_INTERCEPT
+                                self._pursuit_fsm.reset()
+                                self._enemy_tracker.reset()
+                                print("[main] Intercept mode ON — tracking enemy")
 
             # 9. FPS tracking
             self._fps_count += 1
@@ -693,6 +865,22 @@ class AutoDriveApp:
                 self._filtered_x = None
                 self._filtered_y = None
 
+    def _on_cv_click(self, event, x, y, flags, param):
+        """Mouse callback for click-to-point on the CV window."""
+        if event != cv2.EVENT_LBUTTONDOWN:
+            return
+
+        try:
+            x_cm, y_cm = self.tracker.px_to_cm(x, y)
+        except (ValueError, cv2.error) as e:
+            print(f"[click] Failed to convert pixel ({x},{y}): {e}")
+            return
+
+        print(f"[click] Target: pixel=({x},{y}) -> ({x_cm:.1f},{y_cm:.1f})cm")
+        mission = generate_goto(x_cm, y_cm)
+        self.follower.start_mission(mission)
+        self.mode = MODE_AUTO
+
     def _update_shared_state(self, x_cm, y_cm, heading_rad, detected, throttle, steering):
         """Push current state to dashboard."""
         lock = self.shared_state["lock"]
@@ -842,6 +1030,8 @@ class AutoDriveApp:
         self.running = False
         print("[main] Stopping motors ...")
         self.comms.close()
+        print("[main] Stopping telemetry ...")
+        self._telemetry.stop()
         print("[main] Stopping camera ...")
         if self.camera:
             self.camera.stop()

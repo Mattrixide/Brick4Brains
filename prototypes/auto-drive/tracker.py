@@ -46,8 +46,15 @@ class ThreadedCamera:
         self.resolution_index = resolution_index
         w, h = RESOLUTIONS[resolution_index]
 
-        backend = cv2.CAP_DSHOW if platform.system() == "Windows" else cv2.CAP_ANY
-        self.cap = cv2.VideoCapture(src, backend)
+        # Try MSMF first (works for Lumina + built-in cam), fall back to DSHOW
+        if platform.system() == "Windows":
+            self.cap = cv2.VideoCapture(src, cv2.CAP_MSMF)
+            if not self.cap.isOpened():
+                self.cap = cv2.VideoCapture(src, cv2.CAP_DSHOW)
+            if not self.cap.isOpened():
+                self.cap = cv2.VideoCapture(src)
+        else:
+            self.cap = cv2.VideoCapture(src, cv2.CAP_ANY)
 
         # Request MJPG codec
         self.cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*"MJPG"))

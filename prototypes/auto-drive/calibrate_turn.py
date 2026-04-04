@@ -59,6 +59,9 @@ def reset_imu_yaw(esp32_ip):
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--esp32", default="192.168.4.113")
+    parser.add_argument("--mono", action="store_true", default=True,
+                        help="Use OAK-D mono camera (120fps global shutter)")
+    parser.add_argument("--fps", type=float, default=120.0)
     args = parser.parse_args()
 
     esp32_ip = args.esp32
@@ -69,8 +72,10 @@ def main():
     print()
 
     # Camera + tracker
-    print("Opening OAK-D Pro...")
-    camera = create_camera(src=0, resolution_index=1, use_oakd=True, target_fps=60.0).start()
+    cam_type = "mono 120fps" if args.mono else "color 60fps"
+    print(f"Opening OAK-D Pro ({cam_type})...")
+    camera = create_camera(src=0, resolution_index=1, use_oakd=True,
+                           use_mono=args.mono, target_fps=args.fps).start()
     time.sleep(1.0)
     tracker = ArUcoTracker(use_clahe=True)
 

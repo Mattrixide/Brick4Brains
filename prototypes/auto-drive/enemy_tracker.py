@@ -55,7 +55,7 @@ class EnemyKalmanFilter:
         self.R = np.eye(2, dtype=np.float64) * sigma_meas**2
 
         self.frames_without_detection = 0
-        self.max_coast = 15  # ~250ms at 60fps
+        self.max_coast = 60  # ~1s at 60fps — stationary objects may flicker
         self._initialized = False
 
     def predict(self):
@@ -129,58 +129,152 @@ class EnemyKalmanFilter:
 # ---------------------------------------------------------------------------
 
 class EnemyDetector:
-    """Detects the enemy robot via background subtraction.
+    """Detects the enemy robot using reference frame differencing + MOG2.
 
-    Pipeline: MOG2 → morphology → contour filter → exclude our robot → centroid
+    Two detection methods combined:
+    1. Reference frame diff: captures empty arena, detects anything new (even stationary)
+    2. MOG2 background subtraction: detects moving objects (complements reference diff)
+
+    Either method triggering counts as a detection.
+
+    Pipeline: diff/MOG2 → morphology → contour filter → exclude our robot → centroid
     """
 
     # Contour filter thresholds (720p, overhead camera)
-    MIN_AREA = 400       # px² (~20×20)
+    MIN_AREA = 800       # px² (~28×28) — raised to reject small noise
     MAX_AREA = 8000      # px² (~90×90)
     MIN_ASPECT = 0.3
     MAX_ASPECT = 3.0
-    MIN_SOLIDITY = 0.4
+    MIN_SOLIDITY = 0.5   # raised — real robots are solid shapes
 
-    def __init__(self):
+    def __init__(self, diff_threshold=30):
+        """Initialize detector.
+
+        Args:
+            diff_threshold: pixel intensity difference to count as foreground (0-255).
+                            Higher = less sensitive, fewer false positives.
+        """
         self.bg_sub = cv2.createBackgroundSubtractorMOG2(
             history=120,
             varThreshold=30,
             detectShadows=False,
         )
-        self._kernel_open = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
-        self._kernel_close = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (15, 15))
+        self._kernel_open = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (7, 7))
+        self._kernel_close = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (21, 21))
+        self._diff_threshold = diff_threshold
+
+        # Reference frame (empty arena)
+        self._reference_gray = None
+        self._last_fg_mask = None
+
+        # Arena mask — only detect within the arena polygon
+        self._arena_mask = None
+
+        # Target lock — once tracking, stick with nearest detection
+        self._track_lock_px = None
+
+        # ROI tracker — once locked, track a small region instead of full frame
+        self._roi_tracker = None
+        self._roi_bbox = None  # (x, y, w, h)
+        self._roi_frames_ok = 0
+
+    def set_arena_corners(self, corners_px):
+        """Set the arena boundary polygon for masking detections.
+
+        Args:
+            corners_px: list of [x, y] pixel coordinates of arena corners
+        """
+        if corners_px and len(corners_px) >= 3:
+            pts = np.array(corners_px, dtype=np.int32)
+            # We'll create the mask lazily once we know the frame size
+            self._arena_pts = pts
+            self._arena_mask = None  # reset, will be created on next detect()
+            print(f"[enemy] Arena mask set ({len(corners_px)} corners)")
+
+    def capture_reference(self, frame):
+        """Capture the current frame as the empty arena reference.
+
+        Call this when the arena is empty (no enemy, our robot can be present
+        since it's excluded by ArUco mask anyway).
+        """
+        self._reference_gray = cv2.GaussianBlur(
+            cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY), (5, 5), 0
+        )
+        print(f"[enemy] Reference frame captured ({frame.shape[1]}x{frame.shape[0]})")
+
+    @property
+    def has_reference(self) -> bool:
+        return self._reference_gray is not None
 
     def detect(self, frame, our_robot_corners=None):
         """Detect enemy in frame. Returns (cx, cy) in pixels or None.
 
-        Args:
-            frame: BGR camera frame
-            our_robot_corners: ArUco corner array for our robot (to exclude)
-
-        Returns:
-            (cx, cy) pixel centroid of largest valid detection, or None
+        Uses ROI tracker if locked on, otherwise reference diff + MOG2.
         """
-        # 1. Background subtraction
-        fg_mask = self.bg_sub.apply(frame, learningRate=0.005)
-        _, fg_mask = cv2.threshold(fg_mask, 200, 255, cv2.THRESH_BINARY)
+        # If we have an active ROI tracker, use it (much more stable)
+        if self._roi_tracker is not None:
+            ok, bbox = self._roi_tracker.update(frame)
+            if ok:
+                x, y, w, h = [int(v) for v in bbox]
+                self._roi_bbox = (x, y, w, h)
+                cx, cy = x + w // 2, y + h // 2
+                self._track_lock_px = (cx, cy)
+                self._roi_frames_ok += 1
+                self._last_fg_mask = None
+                return (cx, cy)
+            else:
+                # Tracker lost — fall back to detection
+                print("[enemy] ROI tracker lost — falling back to detection")
+                self._roi_tracker = None
+                self._roi_bbox = None
+                self._roi_frames_ok = 0
 
-        # 2. Morphological cleanup
+        fg_mask = np.zeros(frame.shape[:2], dtype=np.uint8)
+
+        # Method 1: Reference frame differencing (detects stationary objects)
+        # This is the PRIMARY method — it sees anything new vs the empty arena
+        if self._reference_gray is not None:
+            current_gray = cv2.GaussianBlur(
+                cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY), (5, 5), 0
+            )
+            diff = cv2.absdiff(current_gray, self._reference_gray)
+            _, ref_mask = cv2.threshold(diff, self._diff_threshold, 255, cv2.THRESH_BINARY)
+            # Pre-exclude our robot from reference diff (it will always differ)
+            if our_robot_corners is not None:
+                center = our_robot_corners.mean(axis=0).astype(int)
+                cv2.circle(ref_mask, tuple(center), 100, 0, -1)
+            fg_mask = cv2.bitwise_or(fg_mask, ref_mask)
+
+        # Method 2: MOG2 (detects motion, supplements reference diff)
+        # Very low learning rate so stationary objects don't get absorbed
+        mog_mask = self.bg_sub.apply(frame, learningRate=0.001)
+        _, mog_mask = cv2.threshold(mog_mask, 200, 255, cv2.THRESH_BINARY)
+        fg_mask = cv2.bitwise_or(fg_mask, mog_mask)
+
+        # Morphological cleanup
         fg_mask = cv2.morphologyEx(fg_mask, cv2.MORPH_OPEN, self._kernel_open)
         fg_mask = cv2.morphologyEx(fg_mask, cv2.MORPH_CLOSE, self._kernel_close)
 
-        # 3. Exclude our robot
+        # Mask to arena bounds only
+        if hasattr(self, '_arena_pts') and self._arena_pts is not None:
+            if self._arena_mask is None or self._arena_mask.shape != fg_mask.shape:
+                self._arena_mask = np.zeros(fg_mask.shape, dtype=np.uint8)
+                cv2.fillPoly(self._arena_mask, [self._arena_pts], 255)
+            fg_mask = cv2.bitwise_and(fg_mask, self._arena_mask)
+
+        # Exclude our robot (generous radius to cover full body, not just marker)
         if our_robot_corners is not None:
             center = our_robot_corners.mean(axis=0).astype(int)
-            cv2.circle(fg_mask, tuple(center), 50, 0, -1)
+            cv2.circle(fg_mask, tuple(center), 100, 0, -1)
 
-        # 4. Find and filter contours
+        self._last_fg_mask = fg_mask
+
+        # Find and filter contours
         contours, _ = cv2.findContours(
             fg_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
         )
 
-        best = None
-        best_area = 0
-
+        candidates = []
         for c in contours:
             area = cv2.contourArea(c)
             if not (self.MIN_AREA < area < self.MAX_AREA):
@@ -196,20 +290,58 @@ class EnemyDetector:
             if solidity < self.MIN_SOLIDITY:
                 continue
 
-            # Keep largest valid detection
-            if area > best_area:
-                M = cv2.moments(c)
-                if M["m00"] > 0:
-                    best = (M["m10"] / M["m00"], M["m01"] / M["m00"])
-                    best_area = area
+            M = cv2.moments(c)
+            if M["m00"] > 0:
+                cx = M["m10"] / M["m00"]
+                cy = M["m01"] / M["m00"]
+                candidates.append((cx, cy, area))
+
+        if not candidates:
+            if hasattr(self, '_consecutive_detections'):
+                self._consecutive_detections = 0
+            return None
+
+        # If we have a tracked position, pick the candidate closest to it
+        # (target lock — don't jump to a new object)
+        if self._track_lock_px is not None:
+            lx, ly = self._track_lock_px
+            candidates.sort(key=lambda c: (c[0]-lx)**2 + (c[1]-ly)**2)
+        else:
+            # No lock yet — pick largest
+            candidates.sort(key=lambda c: c[2], reverse=True)
+
+        best = (candidates[0][0], candidates[0][1])
+        best_area = candidates[0][2]
+        self._track_lock_px = best  # update lock position
+
+        # Initialize ROI tracker after several consistent detections
+        if self._roi_tracker is None and best is not None:
+            if not hasattr(self, '_consecutive_detections'):
+                self._consecutive_detections = 0
+            self._consecutive_detections += 1
+            if self._consecutive_detections < 10:
+                return best  # don't lock on yet, just return raw detection
+
+            # Enough consistent detections — lock on
+            side = int(math.sqrt(best_area)) + 20  # pad a bit
+            cx, cy = int(best[0]), int(best[1])
+            x = max(0, cx - side // 2)
+            y = max(0, cy - side // 2)
+            w = min(side, frame.shape[1] - x)
+            h = min(side, frame.shape[0] - y)
+            if w > 10 and h > 10:
+                self._roi_tracker = cv2.TrackerMIL_create()
+                self._roi_tracker.init(frame, (x, y, w, h))
+                self._roi_bbox = (x, y, w, h)
+                self._roi_frames_ok = 0
+                print(f"[enemy] ROI tracker initialized at ({x},{y} {w}x{h})")
 
         return best
 
     @property
     def fg_mask(self):
         """Return the latest foreground mask (for debug overlay)."""
-        # Not stored by default to save memory — call detect() first
-        return None
+        return self._last_fg_mask
 
 
 # ---------------------------------------------------------------------------
@@ -333,5 +465,10 @@ class EnemyTracker:
 
     def reset(self):
         self.kalman.reset()
+        self.detector._track_lock_px = None
+        self.detector._roi_tracker = None
+        self.detector._roi_bbox = None
+        self.detector._roi_frames_ok = 0
+        self.detector._consecutive_detections = 0
         self._last_detection_px = None
         self._last_detection_cm = None

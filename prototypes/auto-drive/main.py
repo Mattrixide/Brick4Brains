@@ -110,12 +110,13 @@ class AutoDriveApp:
         self._last_telemetry_time = 0.0
 
         # Enemy tracking + interception
-        self._enemy_tracker = EnemyTracker(dt=1/60, sigma_a=5.0, sigma_meas_cm=1.0)
+        self._enemy_tracker = EnemyTracker(dt=1/30, sigma_a=2.0, sigma_meas_cm=5.0)
         self._pursuit_fsm = PursuitFSM()
         self._smoothed_intercept = SmoothedIntercept(alpha=0.3)
         self._our_velocity = (0.0, 0.0)  # estimated from position changes
         self._prev_pos = None
         self._our_max_speed_cm_s = 50.0  # tune based on robot capability
+        self._intercept_prev_steering = 0.0  # slew rate limiter for intercept
 
         # Click-to-point state
         self._click_target_px = None
@@ -207,6 +208,23 @@ class AutoDriveApp:
             self._floor_det = FloorPlaneDetector()  # loads from floor_calibration.json
         elif os.path.exists(legacy_path):
             self.tracker.load_homography(legacy_path)
+
+        # Load arena corners for enemy detection masking
+        import json, os
+        floor_path = os.path.join(
+            os.path.dirname(os.path.abspath(__file__)), "floor_calibration.json"
+        )
+        if os.path.exists(floor_path):
+            with open(floor_path) as f:
+                floor_data = json.load(f)
+            corners_px = floor_data.get("corners_px")
+            if corners_px:
+                self._enemy_tracker.detector.set_arena_corners(corners_px)
+
+        # Capture reference frame (empty arena) for enemy detection
+        ref_frame = self.camera.read()
+        if ref_frame is not None:
+            self._enemy_tracker.detector.capture_reference(ref_frame)
 
         # Start IMU telemetry receiver
         self._telemetry.start()
@@ -338,8 +356,8 @@ class AutoDriveApp:
             if pose is None and detected is False:
                 self._heading_fusion.update_no_cv()
 
-            # 2b. Enemy tracking (run every frame)
-            if frame is not None:
+            # 2b. Enemy tracking (only run in intercept mode)
+            if frame is not None and self.mode == MODE_INTERCEPT:
                 our_corners = pose.corners if pose is not None else None
                 self._enemy_tracker.update(
                     frame, our_corners,
@@ -423,40 +441,55 @@ class AutoDriveApp:
                         distance,
                     )
 
-                    if state == PursuitState.INTERCEPT:
-                        # Proportional Navigation
-                        throttle, steering = proportional_navigation(
-                            our_pos, self._our_velocity,
-                            enemy_pos, enemy_vel,
-                            N=4.0, max_omega=10.0,
-                        )
-                    elif state == PursuitState.CLOSE:
-                        # Pure pursuit at max speed
-                        throttle, steering = pure_pursuit(
-                            our_pos, heading_rad, enemy_pos
-                        )
-                        throttle = 1.0  # full speed
-                    elif state == PursuitState.ACQUIRE:
-                        # Steer toward enemy while building velocity estimate
-                        throttle, steering = pure_pursuit(
-                            our_pos, heading_rad, enemy_pos
-                        )
-                        throttle *= 0.5  # half speed during acquire
-                    elif state == PursuitState.LOST:
-                        # Coast toward last predicted position
-                        pred_pos = self._enemy_tracker.position_cm
-                        throttle, steering = pure_pursuit(
-                            our_pos, heading_rad, pred_pos
-                        )
+                    # Two-phase tank drive: turn to face enemy, then drive straight
+                    from autonomy import angle_diff
+                    desired_heading = math.atan2(
+                        enemy_pos[1] - y_cm, enemy_pos[0] - x_cm
+                    )
+                    # Normalize heading to [-pi, pi] before computing error
+                    norm_heading = math.atan2(math.sin(heading_rad), math.cos(heading_rad))
+                    heading_error = angle_diff(desired_heading, norm_heading)
+                    turn_threshold = 0.35  # ~20 degrees
+
+                    if state == PursuitState.LOST:
                         throttle *= 0.3
-                    else:
-                        # SEARCH — spin slowly
+                        steering *= 0.3
+                    elif state == PursuitState.SEARCH:
                         throttle = 0.0
-                        steering = 0.3
+                        steering = 0.0
+                    elif abs(heading_error) > turn_threshold:
+                        # TURN: proportional with high gain, clamped
+                        # Full power for large errors, proportional for small
+                        throttle = 0.0
+                        if abs(heading_error) > 1.5:  # >86 degrees — full speed spin
+                            steering = 0.8 if heading_error > 0 else -0.8
+                        else:
+                            steering = max(-0.8, min(0.8, heading_error * 0.6))
+                    else:
+                        # DRIVE: full speed toward enemy with proportional steering
+                        if distance < 10.0:
+                            throttle = 0.0
+                            steering = 0.0
+                        else:
+                            throttle = min(1.0, distance / 20.0)
+                            steering = heading_error * 1.0  # proportional correction while driving
+                            steering = max(-0.5, min(0.5, steering))  # cap so we don't spin
+
+                    # Debug log at 2Hz
+                    if not hasattr(self, '_intercept_log_t'):
+                        self._intercept_log_t = 0
+                    if now - self._intercept_log_t > 0.5:
+                        self._intercept_log_t = now
+                        phase = "TURN" if abs(heading_error) > turn_threshold else "DRIVE"
+                        print(f"[intercept] {state} {phase} | "
+                              f"robot=({x_cm:.0f},{y_cm:.0f}) hdg={math.degrees(heading_rad):.0f}° | "
+                              f"enemy=({enemy_pos[0]:.0f},{enemy_pos[1]:.0f}) | "
+                              f"dist={distance:.0f}cm herr={math.degrees(heading_error):.0f}° | "
+                              f"thr={throttle:.2f} str={steering:.2f}")
                 elif not self._enemy_tracker.is_tracking:
-                    # Lost enemy completely — spin to search
+                    # No valid track — hold still
                     throttle = 0.0
-                    steering = 0.3
+                    steering = 0.0
 
             elif self.mode == MODE_IDLE:
                 # Check for controller override — require deliberate input
@@ -581,6 +614,18 @@ class AutoDriveApp:
                     with self._jpeg_lock:
                         self._latest_jpeg = jpeg.tobytes()
 
+                    # Draw enemy detection debug mask (small thumbnail, top-right)
+                    fg = self._enemy_tracker.detector.fg_mask
+                    if fg is not None:
+                        thumb_h = 120
+                        thumb_w = int(fg.shape[1] * thumb_h / fg.shape[0])
+                        thumb = cv2.resize(fg, (thumb_w, thumb_h))
+                        thumb_bgr = cv2.cvtColor(thumb, cv2.COLOR_GRAY2BGR)
+                        x_off = stream_frame.shape[1] - thumb_w - 10
+                        stream_frame[10:10+thumb_h, x_off:x_off+thumb_w] = thumb_bgr
+                        cv2.putText(stream_frame, "FG MASK", (x_off, 8),
+                                    cv2.FONT_HERSHEY_SIMPLEX, 0.35, (0, 255, 255), 1)
+
                     # Draw enemy tracking overlay
                     if self._enemy_tracker.is_tracking or self._enemy_tracker.enemy_detected:
                         self._enemy_tracker.draw_overlay(
@@ -612,6 +657,12 @@ class AutoDriveApp:
                             self.running = False
                         elif key == ord("p"):
                             self._handle_calibration({"action": "floor_plane"})
+                        elif key == ord("r"):
+                            # Recapture reference frame
+                            if frame is not None:
+                                self._enemy_tracker.detector.capture_reference(frame)
+                                self._enemy_tracker.reset()
+                                print("[main] Reference frame recaptured")
                         elif key == ord("i"):
                             # Toggle intercept mode
                             if self.mode == MODE_INTERCEPT:

@@ -175,7 +175,7 @@ def pure_pursuit(our_pos, our_heading_rad, target_pos):
     desired = math.atan2(dy, dx)
     heading_err = _angle_diff(desired, our_heading_rad)
 
-    steering = max(-1.0, min(1.0, heading_err * 1.5))
+    steering = max(-1.0, min(1.0, heading_err * 0.8))
     throttle = min(1.0, dist / 30.0)  # proportional to distance
 
     return (throttle, steering)
@@ -233,7 +233,7 @@ class PursuitFSM:
     """
 
     CLOSE_RANGE_CM = 30.0       # switch to pure pursuit
-    ACQUIRE_FRAMES = 10         # frames to build velocity estimate
+    ACQUIRE_FRAMES = 20         # frames to build velocity estimate (~0.7s at 30fps)
     LOST_TIMEOUT_FRAMES = 15    # ~250ms at 60fps
 
     def __init__(self):

@@ -65,6 +65,9 @@ class EnemyKalmanFilter:
         self.x = self.F @ self.x
         self.P = self.F @ self.P @ self.F.T + self.Q
 
+    # Mahalanobis distance gate — reject measurements too far from prediction
+    GATE_THRESHOLD = 4.0  # ~95% chi-squared for 2 DOF
+
     def update(self, measurement):
         """Update step — call with [x, y] when detection available, None otherwise."""
         if measurement is not None:
@@ -80,18 +83,23 @@ class EnemyKalmanFilter:
             # Innovation
             y = z - self.H @ self.x
             S = self.H @ self.P @ self.H.T + self.R
+
+            # Mahalanobis gating — reject teleporting measurements
+            mahal_sq = float(y.T @ np.linalg.inv(S) @ y)
+            if mahal_sq > self.GATE_THRESHOLD ** 2:
+                # Measurement is too far from prediction — reject it
+                self.frames_without_detection += 1
+                return
+
             K = self.P @ self.H.T @ np.linalg.inv(S)
 
             self.x = self.x + K @ y
             self.P = (np.eye(4) - K @ self.H) @ self.P
 
             # Adaptive process noise (NIS check)
-            nis = y.T @ np.linalg.inv(S) @ y
-            if nis > 6.0:
-                # Enemy maneuvering hard — boost Q
+            if mahal_sq > 6.0:
                 self.Q = self.Q_baseline * 4.0
-            elif nis < 1.0:
-                # Tracking well — decay toward baseline
+            elif mahal_sq < 1.0:
                 self.Q = self.Q * 0.9 + self.Q_baseline * 0.1
 
             self.frames_without_detection = 0
@@ -218,19 +226,19 @@ class EnemyDetector:
     def has_reference(self) -> bool:
         return self._reference_gray is not None
 
-    def detect(self, frame, our_robot_corners=None):
+    def detect(self, frame, our_robot_corners=None, use_reference_diff=True):
         """Detect enemy in frame. Returns (cx, cy) in pixels or None.
 
-        Uses ROI tracker if locked on, otherwise reference diff + MOG2.
+        Args:
+            frame: BGR camera frame
+            our_robot_corners: ArUco corners for exclusion
+            use_reference_diff: if False, skip reference diff (use during charge
+                                when our robot moving creates too many artifacts)
         """
-        # No ROI tracker — detect fresh every frame using reference diff + contours
-        # The target lock (nearest-neighbor) provides continuity between frames
-
         fg_mask = np.zeros(frame.shape[:2], dtype=np.uint8)
 
-        # Method 1: Reference frame differencing (detects stationary objects)
-        # This is the PRIMARY method — it sees anything new vs the empty arena
-        if self._reference_gray is not None:
+        # Method 1: Reference frame differencing (only when robot is stationary)
+        if self._reference_gray is not None and use_reference_diff:
             current_gray = cv2.GaussianBlur(
                 cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY), (5, 5), 0
             )
@@ -352,16 +360,19 @@ class EnemyTracker:
         self._last_detection_px = None
         self._last_detection_cm = None
 
-    def update(self, frame, our_robot_corners=None, px_to_cm=None):
+    def update(self, frame, our_robot_corners=None, px_to_cm=None,
+               use_reference_diff=True):
         """Run detection + Kalman update for this frame.
 
         Args:
             frame: BGR camera frame
             our_robot_corners: ArUco corners of our robot (for exclusion)
             px_to_cm: callable(px_x, px_y) -> (x_cm, y_cm)
+            use_reference_diff: pass False during charge to avoid self-detection
         """
         # Detect enemy in pixel space
-        det_px = self.detector.detect(frame, our_robot_corners)
+        det_px = self.detector.detect(frame, our_robot_corners,
+                                       use_reference_diff=use_reference_diff)
 
         # Convert to world coordinates if detection available
         det_cm = None

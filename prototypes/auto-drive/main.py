@@ -370,9 +370,13 @@ class AutoDriveApp:
                 if pose is not None:
                     self._last_our_corners = pose.corners
                 our_corners = getattr(self, '_last_our_corners', None)
+                # During charge: disable reference diff (our robot moving creates artifacts)
+                # Use MOG2 only which adapts to moving background
+                charging = self.mode == MODE_INTERCEPT_CHARGE
                 self._enemy_tracker.update(
                     frame, our_corners,
-                    px_to_cm=self.tracker.px_to_cm
+                    px_to_cm=self.tracker.px_to_cm,
+                    use_reference_diff=not charging,
                 )
 
             # 3. Read controller
@@ -494,18 +498,16 @@ class AutoDriveApp:
                         distance,
                     )
 
-                    # Two-phase tank drive: turn to face enemy, then drive straight
+                    # Pure pursuit arc driving — never stop, always drive + steer
                     from autonomy import angle_diff
                     desired_heading = math.atan2(
                         enemy_pos[1] - y_cm, enemy_pos[0] - x_cm
                     )
-                    # Use IMU-fused heading if calibrated (stable during fast turns)
                     if self._heading_fusion.is_calibrated:
                         use_heading = self._heading_fusion.heading_rad
                     else:
                         use_heading = math.atan2(math.sin(heading_rad), math.cos(heading_rad))
-                    heading_error = angle_diff(desired_heading, use_heading)
-                    turn_threshold = 0.35  # ~20 degrees
+                    alpha = angle_diff(desired_heading, use_heading)
 
                     # HIT — reached enemy, stop and go back to tracking
                     if distance < 10.0:
@@ -513,8 +515,6 @@ class AutoDriveApp:
                         steering = 0.0
                         self.comms.stop()
                         self.mode = MODE_INTERCEPT
-                        # Reset track lock so it can reacquire the enemy
-                        # (enemy may have been pushed to a new position)
                         self._enemy_tracker.detector._track_lock_px = None
                         self._pursuit_fsm.reset()
                         print(f"[intercept] HIT! dist={distance:.0f}cm — back to tracking")
@@ -524,32 +524,45 @@ class AutoDriveApp:
                     elif state == PursuitState.SEARCH:
                         throttle = 0.0
                         steering = 0.0
-                    elif abs(heading_error) > turn_threshold and distance > 30.0:
-                        # FAR + misaligned: stop and turn in place
+                    elif abs(alpha) > 1.0:
+                        # Way off (>57°) — fast spin to face enemy
                         throttle = 0.0
-                        if abs(heading_error) > 1.5:
-                            steering = 0.8 if heading_error > 0 else -0.8
-                        elif abs(heading_error) > 0.5:
-                            steering = 0.5 if heading_error > 0 else -0.5
-                        else:
-                            steering = max(-0.4, min(0.4, heading_error * 0.8))
+                        steering = 0.8 if alpha > 0 else -0.8
+                        self._charge_prev_steer = 0.0  # reset slew for clean arc start
                     else:
-                        # DRIVE: steer while moving — don't stop near enemy
-                        if distance < 5.0:
-                            # On top of enemy — stop
-                            throttle = 0.0
-                            steering = 0.0
+                        # PURE PURSUIT: drive forward + steer arc toward enemy
+                        # Lookahead distance: longer when far (smooth), shorter when close (precise)
+                        lookahead = max(20.0, distance * 0.5)
+
+                        # Arc steering for differential drive
+                        track_width = 15.0  # cm
+                        turn_factor = track_width * math.sin(alpha) / lookahead
+                        raw_steering = max(-0.6, min(0.6, turn_factor * 1.5))
+
+                        # Slew rate limit — prevent swerving
+                        if not hasattr(self, '_charge_prev_steer'):
+                            self._charge_prev_steer = 0.0
+                        max_slew = 0.08  # max steering change per frame
+                        delta = raw_steering - self._charge_prev_steer
+                        delta = max(-max_slew, min(max_slew, delta))
+                        steering = self._charge_prev_steer + delta
+                        self._charge_prev_steer = steering
+
+                        # Throttle: full speed, reduce when steering hard
+                        steer_penalty = 1.0 - abs(steering) * 0.3  # slow a bit during turns
+                        if distance < 15.0:
+                            throttle = 0.3 + 0.5 * (distance / 15.0)
                         else:
-                            # Drive + steer simultaneously
-                            throttle = min(0.8, distance / 40.0)
-                            steering = max(-0.6, min(0.6, heading_error * 0.5))
+                            throttle = 0.8 * steer_penalty
+
+                    heading_error = alpha  # for debug log
 
                     # Debug log at 2Hz
                     if not hasattr(self, '_intercept_log_t'):
                         self._intercept_log_t = 0
                     if now - self._intercept_log_t > 0.5:
                         self._intercept_log_t = now
-                        phase = "TURN" if abs(heading_error) > turn_threshold else "DRIVE"
+                        phase = "TURN" if abs(heading_error) > 2.6 else "ARC"
                         src = "IMU" if self._heading_fusion.is_calibrated else "CV"
                         print(f"[intercept] {state} {phase} | "
                               f"robot=({x_cm:.0f},{y_cm:.0f}) hdg={math.degrees(use_heading):.0f}°[{src}] | "

@@ -234,7 +234,7 @@ class PursuitFSM:
 
     CLOSE_RANGE_CM = 30.0       # switch to pure pursuit
     ACQUIRE_FRAMES = 20         # frames to build velocity estimate (~0.7s at 30fps)
-    LOST_TIMEOUT_FRAMES = 15    # ~250ms at 60fps
+    LOST_TIMEOUT_FRAMES = 45    # ~750ms at 60fps — coast longer during charge
 
     def __init__(self):
         self.state = PursuitState.SEARCH

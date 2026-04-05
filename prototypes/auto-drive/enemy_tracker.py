@@ -175,6 +175,8 @@ class EnemyDetector:
         self._arena_pts = None
         self._last_fg_mask = None
         self._track_lock_px = None
+        self._lock_stale_frames = 0  # how long lock hasn't moved
+        self._lock_stale_threshold = 120  # ~2 seconds at 60fps → reacquire
 
         # MOG2 warmup
         self._warmup_frames = 0
@@ -333,6 +335,27 @@ class EnemyDetector:
             result = merged_enemy_pos
 
         if result is not None:
+            # Check if lock is stale (hasn't moved in ~2 seconds)
+            if self._track_lock_px is not None:
+                dx = result[0] - self._track_lock_px[0]
+                dy = result[1] - self._track_lock_px[1]
+                if abs(dx) < 5 and abs(dy) < 5:
+                    self._lock_stale_frames += 1
+                else:
+                    self._lock_stale_frames = 0
+
+                if self._lock_stale_frames > self._lock_stale_threshold:
+                    # Lock is stale — drop it and reacquire
+                    self._track_lock_px = None
+                    self._lock_stale_frames = 0
+                    print("[enemy] Track lock stale — reacquiring")
+                    # Pick largest blob instead of nearest to stale position
+                    if enemy_candidates:
+                        enemy_candidates.sort(key=lambda c: c[2], reverse=True)
+                        result = (enemy_candidates[0][0], enemy_candidates[0][1])
+                        self._track_lock_px = result
+                    return result
+
             self._track_lock_px = result
 
         return result
@@ -380,14 +403,24 @@ class EnemyTracker:
         if det_px is not None and px_to_cm is not None:
             try:
                 x_cm, y_cm = px_to_cm(det_px[0], det_px[1])
-                # Arena bounds check — reject detections outside the arena
-                # (arena is ~244cm = 8ft, allow some margin)
+                # Arena bounds check
                 ARENA_MAX_CM = 300.0
                 if abs(x_cm) > ARENA_MAX_CM or abs(y_cm) > ARENA_MAX_CM:
-                    det_px = None  # outside arena — reject
-                    # Uncomment for debug: print(f"[enemy] Rejected: ({x_cm:.0f},{y_cm:.0f})cm outside arena")
+                    det_px = None
                 else:
-                    det_cm = (x_cm / 100.0, y_cm / 100.0)  # cm -> m for Kalman
+                    det_m = (x_cm / 100.0, y_cm / 100.0)
+                    # Speed gate — enemy can't move more than 50cm between frames
+                    # (~30m/s at 60fps — way beyond any beetleweight)
+                    if self.kalman._initialized:
+                        pred = self.kalman.position
+                        jump_m = math.sqrt((det_m[0]-pred[0])**2 + (det_m[1]-pred[1])**2)
+                        if jump_m > 0.5:  # 50cm max between frames
+                            det_px = None  # reject — physically impossible
+                            det_m = None
+                        else:
+                            det_cm = det_m
+                    else:
+                        det_cm = det_m
             except (ValueError, cv2.error):
                 det_cm = None
 

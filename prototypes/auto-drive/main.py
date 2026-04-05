@@ -513,18 +513,19 @@ class AutoDriveApp:
                         near_wall = abs(ex) > 80 or abs(ey) > 80
 
                         if near_wall:
-                            # PIN: enemy against wall, light pressure to hold
-                            throttle = 0.15
+                            # PIN: enemy already at wall — hold
+                            throttle = 0.2
                             steering = 0.0
                             self._pin_start_time = now
                             self.mode = MODE_PIN
                             print(f"[intercept] PIN! enemy at wall ({ex:.0f},{ey:.0f}) — 5s hold")
                         else:
-                            # Mid-arena ram — brief reverse to separate, then track
-                            self._saved_enemy_lock = self._enemy_tracker.detector._track_lock_px
-                            self._reverse_start_time = now
-                            self.mode = MODE_REVERSE
-                            print(f"[intercept] RAM! dist={distance:.0f}cm — reversing to separate")
+                            # Mid-arena ram — FULL POWER push to wall
+                            throttle = 1.0
+                            steering = 0.0
+                            self._pin_start_time = now
+                            self.mode = MODE_PIN
+                            print(f"[intercept] RAM! dist={distance:.0f}cm — PUSHING to wall")
                     elif state == PursuitState.LOST:
                         # Keep driving toward Kalman-predicted enemy position
                         # (don't stop just because detection dropped for a few frames)
@@ -537,35 +538,31 @@ class AutoDriveApp:
                         throttle = 0.0
                         steering = 0.0
                     elif abs(alpha) > 1.0:
-                        # Way off (>57°) — fast spin to face enemy
+                        # Way off (>57°) — spin to face enemy (no slew needed)
                         throttle = 0.0
-                        steering = 0.8 if alpha > 0 else -0.8
-                        self._charge_prev_steer = 0.0  # reset slew for clean arc start
+                        steering = 0.6 if alpha > 0 else -0.6
+                        self._charge_prev_steer = 0.0
                     else:
                         # PURE PURSUIT: drive forward + steer arc toward enemy
-                        # Lookahead distance: longer when far (smooth), shorter when close (precise)
                         lookahead = max(20.0, distance * 0.5)
-
-                        # Arc steering for differential drive
-                        track_width = 15.0  # cm
+                        track_width = 15.0
                         turn_factor = track_width * math.sin(alpha) / lookahead
-                        raw_steering = max(-0.6, min(0.6, turn_factor * 1.5))
+                        raw_steering = max(-0.5, min(0.5, turn_factor * 1.2))
 
-                        # Slew rate limit — prevent swerving
+                        # Slew rate limit — smooth curves
                         if not hasattr(self, '_charge_prev_steer'):
                             self._charge_prev_steer = 0.0
-                        max_slew = 0.08  # max steering change per frame
-                        delta = raw_steering - self._charge_prev_steer
-                        delta = max(-max_slew, min(max_slew, delta))
-                        steering = self._charge_prev_steer + delta
+                        max_slew = 0.08
+                        delta_s = raw_steering - self._charge_prev_steer
+                        delta_s = max(-max_slew, min(max_slew, delta_s))
+                        steering = self._charge_prev_steer + delta_s
                         self._charge_prev_steer = steering
 
-                        # Throttle: full speed, reduce when steering hard
-                        steer_penalty = 1.0 - abs(steering) * 0.3  # slow a bit during turns
+                        # Throttle: full speed, ease off when steering hard
                         if distance < 15.0:
                             throttle = 0.3 + 0.5 * (distance / 15.0)
                         else:
-                            throttle = 0.8 * steer_penalty
+                            throttle = 0.8 * (1.0 - abs(steering) * 0.3)
 
                     heading_error = alpha  # for debug log
 
@@ -629,21 +626,32 @@ class AutoDriveApp:
                     self._pin_aruco_lost_frames = 0
                     print(f"[pin] ArUco lost — REVERSING to reacquire")
                 else:
-                    # Light forward pressure — just hold against wall
-                    throttle = 0.15
-                    steering = 0.0
+                    # Check if enemy is at wall yet
+                    enemy_at_wall = False
+                    if self._enemy_tracker.is_tracking:
+                        epos = self._enemy_tracker.position_cm
+                        enemy_at_wall = abs(epos[0]) > 80 or abs(epos[1]) > 80
+
+                    if enemy_at_wall:
+                        # At wall — soft hold
+                        throttle = 0.2
+                        steering = 0.0
+                    else:
+                        # Not at wall — FULL POWER push
+                        throttle = 1.0
+                        steering = 0.0
 
                     # Check if enemy escaped (moved away)
                     if self._enemy_tracker.is_tracking:
                         enemy_pos = self._enemy_tracker.position_cm
                         pin_dist = math.hypot(enemy_pos[0] - x_cm, enemy_pos[1] - y_cm) if detected else 0
                         if detected and pin_dist > 25:
-                            # Enemy escaped — back to tracking
-                            self.comms.stop()
-                            self.mode = MODE_INTERCEPT
-                            self._pursuit_fsm.reset()
+                            # Enemy escaped — re-engage immediately
+                            self.mode = MODE_INTERCEPT_CHARGE
+                            self._pursuit_fsm._acquire_count = self._pursuit_fsm.ACQUIRE_FRAMES + 1
+                            self._charge_prev_steer = 0.0
                             self._pin_aruco_lost_frames = 0
-                            print(f"[pin] Enemy escaped! dist={pin_dist:.0f}cm — back to tracking")
+                            print(f"[pin] Enemy escaped! dist={pin_dist:.0f}cm — RE-ENGAGING")
 
                     if not hasattr(self, '_pin_log_t'):
                         self._pin_log_t = 0

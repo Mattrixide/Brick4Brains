@@ -55,6 +55,8 @@ MODE_MANUAL = "manual"
 MODE_CALIBRATING = "calibrating"
 MODE_INTERCEPT = "intercept"       # tracking enemy, waiting for trigger
 MODE_INTERCEPT_CHARGE = "charging"  # actively pursuing enemy
+MODE_PIN = "pinning"               # pinning enemy to wall
+MODE_REVERSE = "reversing"         # backing away after pin
 
 
 # ---------------------------------------------------------------------------
@@ -364,34 +366,13 @@ class AutoDriveApp:
             if pose is None and detected is False:
                 self._heading_fusion.update_no_cv()
 
-            # 2b. Enemy tracking (run in both intercept modes)
-            if frame is not None and self.mode in (MODE_INTERCEPT, MODE_INTERCEPT_CHARGE):
-                # Use current ArUco corners, or predict position when marker lost
-                if pose is not None:
-                    self._last_our_corners = pose.corners
-                    self._last_our_center_px = pose.corners.mean(axis=0)
-                elif hasattr(self, '_last_our_center_px') and self._our_velocity != (0, 0):
-                    # Dead-reckon our robot position using velocity
-                    # (approximate — keeps exclusion mask roughly correct during charge)
-                    vx_px = self._our_velocity[0] * (self.tracker._px_per_cm or 5.0) * dt
-                    vy_px = self._our_velocity[1] * (self.tracker._px_per_cm or 5.0) * dt
-                    self._last_our_center_px = (
-                        self._last_our_center_px[0] + vx_px,
-                        self._last_our_center_px[1] + vy_px,
-                    )
-                    # Build fake corners around predicted center (200px radius)
-                    cx, cy = int(self._last_our_center_px[0]), int(self._last_our_center_px[1])
-                    import numpy as _np
-                    self._last_our_corners = _np.array([
-                        [cx-50, cy-50], [cx+50, cy-50],
-                        [cx+50, cy+50], [cx-50, cy+50]
-                    ], dtype=_np.float32)
-                our_corners = getattr(self, '_last_our_corners', None)
-                # Always use reference diff — predicted exclusion handles self-detection
+            # 2b. Enemy tracking (run in ALL intercept-related modes)
+            if frame is not None and self.mode in (MODE_INTERCEPT, MODE_INTERCEPT_CHARGE, MODE_PIN, MODE_REVERSE):
+                # Pass ArUco corners for color-based classification (not exclusion mask)
+                our_corners = pose.corners if pose is not None else None
                 self._enemy_tracker.update(
                     frame, our_corners,
                     px_to_cm=self.tracker.px_to_cm,
-                    use_reference_diff=True,
                 )
 
             # 3. Read controller
@@ -524,15 +505,28 @@ class AutoDriveApp:
                         use_heading = math.atan2(math.sin(heading_rad), math.cos(heading_rad))
                     alpha = angle_diff(desired_heading, use_heading)
 
-                    # HIT — reached enemy, stop and go back to tracking
-                    if distance < 10.0:
-                        throttle = 0.0
-                        steering = 0.0
-                        self.comms.stop()
-                        self.mode = MODE_INTERCEPT
-                        self._enemy_tracker.detector._track_lock_px = None
-                        self._pursuit_fsm.reset()
-                        print(f"[intercept] HIT! dist={distance:.0f}cm — back to tracking")
+                    # HIT — check if enemy is near wall for pin
+                    if distance < 15.0:
+                        # Check if enemy is near arena wall
+                        # (arena roughly ±120cm, wall if any axis > 90cm)
+                        ex, ey = enemy_pos[0], enemy_pos[1]
+                        near_wall = abs(ex) > 80 or abs(ey) > 80
+
+                        if near_wall:
+                            # PIN: enemy against wall, light pressure to hold
+                            throttle = 0.15
+                            steering = 0.0
+                            self._pin_start_time = now
+                            self.mode = MODE_PIN
+                            print(f"[intercept] PIN! enemy at wall ({ex:.0f},{ey:.0f}) — 5s hold")
+                        else:
+                            # Mid-arena ram — back to tracking
+                            throttle = 0.0
+                            steering = 0.0
+                            self.comms.stop()
+                            self.mode = MODE_INTERCEPT
+                            self._pursuit_fsm.reset()
+                            print(f"[intercept] RAM! dist={distance:.0f}cm mid-arena — back to tracking")
                     elif state == PursuitState.LOST:
                         # Keep driving toward Kalman-predicted enemy position
                         # (don't stop just because detection dropped for a few frames)
@@ -594,6 +588,93 @@ class AutoDriveApp:
                     throttle = 0.0
                     steering = 0.0
 
+                # Check: ArUco lost AND robot not moving → off visible area → reverse
+                if not detected:
+                    if not hasattr(self, '_charge_aruco_lost'):
+                        self._charge_aruco_lost = 0
+                    self._charge_aruco_lost += 1
+
+                    # Robot position frozen = not moving (stuck at wall or off camera)
+                    if self._charge_aruco_lost > 45:  # ~0.75s at 60fps
+                        # Save enemy lock for reacquisition after reverse
+                        self._saved_enemy_lock = self._enemy_tracker.detector._track_lock_px
+                        self._reverse_start_time = now
+                        self.mode = MODE_REVERSE
+                        self._charge_aruco_lost = 0
+                        print(f"[charge] ArUco lost & not moving — REVERSING to reacquire")
+                else:
+                    self._charge_aruco_lost = 0
+
+            elif self.mode == MODE_PIN:
+                # Pinning enemy — push forward for 5 seconds
+                pin_elapsed = now - self._pin_start_time
+                pin_remaining = 5.0 - pin_elapsed
+
+                # Track how long ArUco has been lost during pin
+                if not hasattr(self, '_pin_aruco_lost_frames'):
+                    self._pin_aruco_lost_frames = 0
+                if detected:
+                    self._pin_aruco_lost_frames = 0
+                else:
+                    self._pin_aruco_lost_frames += 1
+
+                if pin_remaining <= 0:
+                    self._saved_enemy_lock = self._enemy_tracker.detector._track_lock_px
+                    self._reverse_start_time = now
+                    self.mode = MODE_REVERSE
+                    self._pin_aruco_lost_frames = 0
+                    print("[pin] 5s complete — REVERSING 2ft")
+                elif self._pin_aruco_lost_frames > 30:
+                    self._saved_enemy_lock = self._enemy_tracker.detector._track_lock_px
+                    self._reverse_start_time = now
+                    self.mode = MODE_REVERSE
+                    self._pin_aruco_lost_frames = 0
+                    print(f"[pin] ArUco lost — REVERSING to reacquire")
+                else:
+                    # Light forward pressure — just hold against wall
+                    throttle = 0.15
+                    steering = 0.0
+
+                    # Check if enemy escaped (moved away)
+                    if self._enemy_tracker.is_tracking:
+                        enemy_pos = self._enemy_tracker.position_cm
+                        pin_dist = math.hypot(enemy_pos[0] - x_cm, enemy_pos[1] - y_cm) if detected else 0
+                        if detected and pin_dist > 25:
+                            # Enemy escaped — back to tracking
+                            self.comms.stop()
+                            self.mode = MODE_INTERCEPT
+                            self._pursuit_fsm.reset()
+                            self._pin_aruco_lost_frames = 0
+                            print(f"[pin] Enemy escaped! dist={pin_dist:.0f}cm — back to tracking")
+
+                    if not hasattr(self, '_pin_log_t'):
+                        self._pin_log_t = 0
+                    if now - self._pin_log_t > 1.0:
+                        self._pin_log_t = now
+                        aruco_status = "OK" if detected else f"LOST({self._pin_aruco_lost_frames})"
+                        print(f"[pin] {pin_remaining:.0f}s remaining... ArUco: {aruco_status}")
+
+            elif self.mode == MODE_REVERSE:
+                # Reverse 2 feet (~60cm) — drive backward for ~2 seconds
+                reverse_elapsed = now - self._reverse_start_time
+
+                if reverse_elapsed > 2.0:
+                    # Done reversing — back to tracking
+                    throttle = 0.0
+                    steering = 0.0
+                    self.comms.stop()
+                    self.mode = MODE_INTERCEPT
+                    self._pursuit_fsm.reset()
+                    # Restore enemy track lock so it reacquires near last known position
+                    if hasattr(self, '_saved_enemy_lock') and self._saved_enemy_lock is not None:
+                        self._enemy_tracker.detector._track_lock_px = self._saved_enemy_lock
+                        self._saved_enemy_lock = None
+                    print("[reverse] Done — back to tracking")
+                else:
+                    # Drive backward
+                    throttle = -0.5
+                    steering = 0.0
+
             elif self.mode == MODE_IDLE:
                 # Check for controller override — require deliberate input
                 override = (abs(ctrl.throttle) > 0.25 or
@@ -609,7 +690,7 @@ class AutoDriveApp:
             # 6. Apply inversions for ESP32 (invertThrottle=-1, invertSteering=-1)
             # The ESP32 applies its own invertThrottle=-1 and invertSteering=-1
             # so we pre-negate to cancel that out, then the ESC gets the right sign
-            if self.mode in (MODE_AUTO, MODE_INTERCEPT, MODE_INTERCEPT_CHARGE):
+            if self.mode in (MODE_AUTO, MODE_INTERCEPT, MODE_INTERCEPT_CHARGE, MODE_PIN, MODE_REVERSE):
                 steering = -steering
 
             if self.mode == MODE_AUTO:
@@ -691,6 +772,8 @@ class AutoDriveApp:
                         MODE_CALIBRATING: (0, 255, 255),
                         MODE_INTERCEPT: (0, 165, 255),
                         MODE_INTERCEPT_CHARGE: (0, 0, 255),
+                        MODE_PIN: (0, 255, 255),
+                        MODE_REVERSE: (255, 0, 255),
                     }.get(self.mode, (200, 200, 200))
                     cv2.putText(
                         stream_frame, f"Mode: {self.mode.upper()}", (10, 30),
@@ -744,6 +827,26 @@ class AutoDriveApp:
                         state_text = f"Pursuit: {self._pursuit_fsm.state.upper()}"
                         cv2.putText(stream_frame, state_text, (10, 90),
                                     cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 200, 255), 1)
+
+                    # PIN countdown overlay
+                    if self.mode == MODE_PIN and hasattr(self, '_pin_start_time'):
+                        remaining = max(0, 5.0 - (time.perf_counter() - self._pin_start_time))
+                        h_f, w_f = stream_frame.shape[:2]
+                        countdown_text = f"{remaining:.1f}"
+                        text_size = cv2.getTextSize(countdown_text, cv2.FONT_HERSHEY_SIMPLEX, 4, 8)[0]
+                        tx = (w_f - text_size[0]) // 2
+                        ty = (h_f + text_size[1]) // 2
+                        cv2.putText(stream_frame, countdown_text, (tx+3, ty+3),
+                                    cv2.FONT_HERSHEY_SIMPLEX, 4, (0, 0, 0), 10)
+                        cv2.putText(stream_frame, countdown_text, (tx, ty),
+                                    cv2.FONT_HERSHEY_SIMPLEX, 4, (0, 255, 255), 8)
+                        cv2.putText(stream_frame, "PINNING", (tx, ty - 80),
+                                    cv2.FONT_HERSHEY_SIMPLEX, 1.5, (0, 255, 255), 3)
+
+                    elif self.mode == MODE_REVERSE:
+                        h_f, w_f = stream_frame.shape[:2]
+                        cv2.putText(stream_frame, "REVERSING", (w_f//2 - 150, h_f//2),
+                                    cv2.FONT_HERSHEY_SIMPLEX, 2, (255, 0, 255), 5)
 
                     # Draw IMU fusion status
                     if self._telemetry.is_active:
@@ -803,7 +906,7 @@ class AutoDriveApp:
                                 print("[main] Reference frame recaptured")
                         elif key == ord("i"):
                             # Toggle intercept mode
-                            if self.mode in (MODE_INTERCEPT, MODE_INTERCEPT_CHARGE):
+                            if self.mode in (MODE_INTERCEPT, MODE_INTERCEPT_CHARGE, MODE_PIN, MODE_REVERSE):
                                 self.mode = MODE_IDLE
                                 self._pursuit_fsm.reset()
                                 self.comms.stop()

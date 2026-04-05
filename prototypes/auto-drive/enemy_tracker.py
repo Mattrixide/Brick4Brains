@@ -141,8 +141,8 @@ class EnemyDetector:
     """
 
     # Contour filter thresholds (720p, overhead camera)
-    MIN_AREA = 800       # px² (~28×28) — raised to reject small noise
-    MAX_AREA = 8000      # px² (~90×90)
+    MIN_AREA = 400       # px² (~20×20) — lower for small robots
+    MAX_AREA = 25000     # px² (~158×158) — larger to handle close-up perspective
     MIN_ASPECT = 0.3
     MAX_ASPECT = 3.0
     MIN_SOLIDITY = 0.5   # raised — real robots are solid shapes
@@ -173,23 +173,35 @@ class EnemyDetector:
         # Target lock — once tracking, stick with nearest detection
         self._track_lock_px = None
 
+        # Static detection filter — ignore blobs that don't move
+        self._static_positions = []   # list of (x, y, frames_static)
+        self._static_threshold = 15   # pixels — if blob hasn't moved this much, it's static
+        self._static_max_frames = 30  # after this many frames, mark as static ghost
+
         # ROI tracker — once locked, track a small region instead of full frame
         self._roi_tracker = None
         self._roi_bbox = None  # (x, y, w, h)
         self._roi_frames_ok = 0
 
-    def set_arena_corners(self, corners_px):
+    def set_arena_corners(self, corners_px, expand_px=30):
         """Set the arena boundary polygon for masking detections.
 
         Args:
             corners_px: list of [x, y] pixel coordinates of arena corners
+            expand_px: expand the polygon by this many pixels (catches edges)
         """
         if corners_px and len(corners_px) >= 3:
-            pts = np.array(corners_px, dtype=np.int32)
-            # We'll create the mask lazily once we know the frame size
-            self._arena_pts = pts
+            pts = np.array(corners_px, dtype=np.float32)
+            # Expand polygon outward to catch detections near arena edges
+            center = pts.mean(axis=0)
+            for i in range(len(pts)):
+                direction = pts[i] - center
+                length = np.linalg.norm(direction)
+                if length > 0:
+                    pts[i] = pts[i] + direction / length * expand_px
+            self._arena_pts = pts.astype(np.int32)
             self._arena_mask = None  # reset, will be created on next detect()
-            print(f"[enemy] Arena mask set ({len(corners_px)} corners)")
+            print(f"[enemy] Arena mask set ({len(corners_px)} corners, +{expand_px}px expansion)")
 
     def capture_reference(self, frame):
         """Capture the current frame as the empty arena reference.
@@ -211,23 +223,8 @@ class EnemyDetector:
 
         Uses ROI tracker if locked on, otherwise reference diff + MOG2.
         """
-        # If we have an active ROI tracker, use it (much more stable)
-        if self._roi_tracker is not None:
-            ok, bbox = self._roi_tracker.update(frame)
-            if ok:
-                x, y, w, h = [int(v) for v in bbox]
-                self._roi_bbox = (x, y, w, h)
-                cx, cy = x + w // 2, y + h // 2
-                self._track_lock_px = (cx, cy)
-                self._roi_frames_ok += 1
-                self._last_fg_mask = None
-                return (cx, cy)
-            else:
-                # Tracker lost — fall back to detection
-                print("[enemy] ROI tracker lost — falling back to detection")
-                self._roi_tracker = None
-                self._roi_bbox = None
-                self._roi_frames_ok = 0
+        # No ROI tracker — detect fresh every frame using reference diff + contours
+        # The target lock (nearest-neighbor) provides continuity between frames
 
         fg_mask = np.zeros(frame.shape[:2], dtype=np.uint8)
 
@@ -242,7 +239,7 @@ class EnemyDetector:
             # Pre-exclude our robot from reference diff (it will always differ)
             if our_robot_corners is not None:
                 center = our_robot_corners.mean(axis=0).astype(int)
-                cv2.circle(ref_mask, tuple(center), 100, 0, -1)
+                cv2.circle(ref_mask, tuple(center), 150, 0, -1)
             fg_mask = cv2.bitwise_or(fg_mask, ref_mask)
 
         # Method 2: MOG2 (detects motion, supplements reference diff)
@@ -262,10 +259,10 @@ class EnemyDetector:
                 cv2.fillPoly(self._arena_mask, [self._arena_pts], 255)
             fg_mask = cv2.bitwise_and(fg_mask, self._arena_mask)
 
-        # Exclude our robot (generous radius to cover full body, not just marker)
+        # Exclude our robot (very generous radius — robot appears large when close to camera)
         if our_robot_corners is not None:
             center = our_robot_corners.mean(axis=0).astype(int)
-            cv2.circle(fg_mask, tuple(center), 100, 0, -1)
+            cv2.circle(fg_mask, tuple(center), 150, 0, -1)
 
         self._last_fg_mask = fg_mask
 
@@ -301,40 +298,28 @@ class EnemyDetector:
                 self._consecutive_detections = 0
             return None
 
-        # If we have a tracked position, pick the candidate closest to it
-        # (target lock — don't jump to a new object)
+        # Reject teleporting detections — if closest candidate jumped too far
+        # from last known position, it's probably our own robot or a ghost
+        MAX_JUMP_PX = 80  # max pixels between frames (~50cm at typical resolution)
+
+        # If we have a tracked position, pick nearest candidate + reject teleports
         if self._track_lock_px is not None:
             lx, ly = self._track_lock_px
             candidates.sort(key=lambda c: (c[0]-lx)**2 + (c[1]-ly)**2)
+
+            # Check if nearest candidate is within jump limit
+            nearest = candidates[0]
+            dist = math.sqrt((nearest[0]-lx)**2 + (nearest[1]-ly)**2)
+            if dist > MAX_JUMP_PX:
+                # All candidates are too far — enemy probably occluded by our robot
+                # Don't update lock, return None (Kalman will coast)
+                return None
         else:
             # No lock yet — pick largest
             candidates.sort(key=lambda c: c[2], reverse=True)
 
         best = (candidates[0][0], candidates[0][1])
-        best_area = candidates[0][2]
-        self._track_lock_px = best  # update lock position
-
-        # Initialize ROI tracker after several consistent detections
-        if self._roi_tracker is None and best is not None:
-            if not hasattr(self, '_consecutive_detections'):
-                self._consecutive_detections = 0
-            self._consecutive_detections += 1
-            if self._consecutive_detections < 10:
-                return best  # don't lock on yet, just return raw detection
-
-            # Enough consistent detections — lock on
-            side = int(math.sqrt(best_area)) + 20  # pad a bit
-            cx, cy = int(best[0]), int(best[1])
-            x = max(0, cx - side // 2)
-            y = max(0, cy - side // 2)
-            w = min(side, frame.shape[1] - x)
-            h = min(side, frame.shape[0] - y)
-            if w > 10 and h > 10:
-                self._roi_tracker = cv2.TrackerMIL_create()
-                self._roi_tracker.init(frame, (x, y, w, h))
-                self._roi_bbox = (x, y, w, h)
-                self._roi_frames_ok = 0
-                print(f"[enemy] ROI tracker initialized at ({x},{y} {w}x{h})")
+        self._track_lock_px = best
 
         return best
 
@@ -466,9 +451,7 @@ class EnemyTracker:
     def reset(self):
         self.kalman.reset()
         self.detector._track_lock_px = None
-        self.detector._roi_tracker = None
-        self.detector._roi_bbox = None
-        self.detector._roi_frames_ok = 0
         self.detector._consecutive_detections = 0
+        self.detector._static_positions = []
         self._last_detection_px = None
         self._last_detection_cm = None

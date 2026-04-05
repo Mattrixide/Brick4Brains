@@ -77,6 +77,20 @@ def main():
         if hasattr(detector, '_arena_pts') and detector._arena_pts is not None:
             cv2.polylines(display, [detector._arena_pts], True, (0, 255, 0), 2)
 
+        # Draw ALL contours that pass size filter (even if they fail other filters)
+        fg = detector.fg_mask
+        if fg is not None:
+            contours, _ = cv2.findContours(fg.copy(), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+            for c in contours:
+                area = cv2.contourArea(c)
+                if area > 100:  # show anything bigger than 100px
+                    x, y, w, h = cv2.boundingRect(c)
+                    passed = detector.MIN_AREA < area < detector.MAX_AREA
+                    color = (0, 255, 0) if passed else (0, 0, 180)
+                    cv2.rectangle(display, (x, y), (x+w, y+h), color, 1)
+                    cv2.putText(display, f"{int(area)}", (x, y-5),
+                                cv2.FONT_HERSHEY_SIMPLEX, 0.35, color, 1)
+
         # Draw detection
         if detection is not None:
             cx, cy = int(detection[0]), int(detection[1])
@@ -106,6 +120,15 @@ def main():
         status = f"Threshold: {detector._diff_threshold} | Ref: {'YES' if reference_captured else 'NO (press r)'}"
         if detection:
             status += f" | DETECTED at ({int(detection[0])}, {int(detection[1])})"
+            # Save detection screenshot (once per detection, not every frame)
+            if not hasattr(main, '_last_det_save'):
+                main._last_det_save = 0
+            now_t = time.time()
+            if now_t - main._last_det_save > 2.0:
+                main._last_det_save = now_t
+                save_dir = os.path.dirname(os.path.abspath(__file__))
+                cv2.imwrite(os.path.join(save_dir, "debug_detection.png"), combined)
+                print(f"  Detection screenshot saved")
         cv2.putText(combined, status, (10, 30),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2)
 
@@ -117,7 +140,12 @@ def main():
         elif key == ord('r'):
             detector.capture_reference(frame)
             reference_captured = True
+            # Save screenshot of the reference frame + current view
+            save_dir = os.path.dirname(os.path.abspath(__file__))
+            cv2.imwrite(os.path.join(save_dir, "debug_reference.png"), frame)
+            cv2.imwrite(os.path.join(save_dir, "debug_combined.png"), combined)
             print(f"Reference captured! Threshold: {detector._diff_threshold}")
+            print(f"  Saved debug_reference.png and debug_combined.png")
         elif key == ord('+') or key == ord('='):
             detector._diff_threshold = min(255, detector._diff_threshold + 5)
             print(f"Threshold: {detector._diff_threshold}")

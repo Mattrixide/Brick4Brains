@@ -53,7 +53,8 @@ MODE_IDLE = "idle"
 MODE_AUTO = "auto"
 MODE_MANUAL = "manual"
 MODE_CALIBRATING = "calibrating"
-MODE_INTERCEPT = "intercept"
+MODE_INTERCEPT = "intercept"       # tracking enemy, waiting for trigger
+MODE_INTERCEPT_CHARGE = "charging"  # actively pursuing enemy
 
 
 # ---------------------------------------------------------------------------
@@ -163,7 +164,7 @@ class AutoDriveApp:
             resolution_index=1,  # 720p
             use_oakd=self.args.oakd,
             use_mono=self.args.mono,
-            target_fps=self.args.fps,
+            target_fps=120.0 if self.args.mono else self.args.fps,
         ).start()
         time.sleep(0.5)  # let camera warm up
         print(f"[camera] Running at {self.camera.fps:.0f} fps")
@@ -363,9 +364,12 @@ class AutoDriveApp:
             if pose is None and detected is False:
                 self._heading_fusion.update_no_cv()
 
-            # 2b. Enemy tracking (only run in intercept mode)
-            if frame is not None and self.mode == MODE_INTERCEPT:
-                our_corners = pose.corners if pose is not None else None
+            # 2b. Enemy tracking (run in both intercept modes)
+            if frame is not None and self.mode in (MODE_INTERCEPT, MODE_INTERCEPT_CHARGE):
+                # Use current ArUco corners, or last known if marker lost
+                if pose is not None:
+                    self._last_our_corners = pose.corners
+                our_corners = getattr(self, '_last_our_corners', None)
                 self._enemy_tracker.update(
                     frame, our_corners,
                     px_to_cm=self.tracker.px_to_cm
@@ -404,12 +408,39 @@ class AutoDriveApp:
                     throttle, steering, done, status = self.follower.update(
                         x_cm, y_cm, heading_rad, dt
                     )
+                    # Log at 2Hz
+                    if not hasattr(self, '_auto_log_t'):
+                        self._auto_log_t = 0
+                    if now - self._auto_log_t > 0.5:
+                        self._auto_log_t = now
+                        print(f"[auto] robot=({x_cm:.0f},{y_cm:.0f}) hdg={math.degrees(heading_rad):.0f}° "
+                              f"thr={throttle:.2f} str={steering:.2f} | {status}")
                     if done:
                         print(f"[auto] {status}")
                         self.mode = MODE_IDLE
                 else:
-                    # Marker lost during auto — hold last steering, zero throttle
-                    throttle = 0.0
+                    # Marker lost — keep driving with last known heading if IMU available
+                    if (self._heading_fusion.is_calibrated and
+                        self._heading_fusion.frames_without_cv < 30 and
+                        self.follower.active):
+                        # Use last known position + IMU heading to continue
+                        # Keep last throttle/steering — don't stop
+                        if not hasattr(self, '_lost_log_t'):
+                            self._lost_log_t = 0
+                        if now - self._lost_log_t > 1.0:
+                            self._lost_log_t = now
+                            print(f"[auto] MARKER LOST — coasting on IMU "
+                                  f"(hdg={self._heading_fusion.heading_deg:.0f}°, "
+                                  f"frames={self._heading_fusion.frames_without_cv})")
+                    else:
+                        # No IMU or lost too long — stop
+                        throttle = 0.0
+                        steering = 0.0
+                        if not hasattr(self, '_lost_log_t'):
+                            self._lost_log_t = 0
+                        if now - self._lost_log_t > 1.0:
+                            self._lost_log_t = now
+                            print("[auto] MARKER LOST — stopping (no IMU or timeout)")
 
             elif self.mode == MODE_CALIBRATING:
                 # Drive with controller while collecting calibration points
@@ -425,13 +456,28 @@ class AutoDriveApp:
                         self.shared_state["calib_points"] = total
 
             elif self.mode == MODE_INTERCEPT:
+                # Tracking mode — detect enemy but don't move
+                # SPACE triggers the charge
+                throttle = 0.0
+                steering = 0.0
+                if self._enemy_tracker.is_tracking:
+                    enemy_pos = self._enemy_tracker.position_cm
+                    distance = math.hypot(enemy_pos[0] - x_cm, enemy_pos[1] - y_cm) if detected else 0
+                    if not hasattr(self, '_track_log_t'):
+                        self._track_log_t = 0
+                    if now - self._track_log_t > 1.0:
+                        self._track_log_t = now
+                        print(f"[track] enemy=({enemy_pos[0]:.0f},{enemy_pos[1]:.0f}) "
+                              f"dist={distance:.0f}cm — press SPACE to charge")
+
+            elif self.mode == MODE_INTERCEPT_CHARGE:
                 # Check for controller override
                 override = (abs(ctrl.throttle) > 0.25 or
                             abs(ctrl.steering) > 0.25 or
                             ctrl.buttons != 0)
                 if override:
                     print("[main] Xbox override — switching to MANUAL")
-                    self.mode = MODE_MANUAL
+                    self.mode = MODE_IDLE
                     self._pursuit_fsm.reset()
                     throttle = ctrl.throttle
                     steering = ctrl.steering
@@ -461,7 +507,18 @@ class AutoDriveApp:
                     heading_error = angle_diff(desired_heading, use_heading)
                     turn_threshold = 0.35  # ~20 degrees
 
-                    if state == PursuitState.LOST:
+                    # HIT — reached enemy, stop and go back to tracking
+                    if distance < 10.0:
+                        throttle = 0.0
+                        steering = 0.0
+                        self.comms.stop()
+                        self.mode = MODE_INTERCEPT
+                        # Reset track lock so it can reacquire the enemy
+                        # (enemy may have been pushed to a new position)
+                        self._enemy_tracker.detector._track_lock_px = None
+                        self._pursuit_fsm.reset()
+                        print(f"[intercept] HIT! dist={distance:.0f}cm — back to tracking")
+                    elif state == PursuitState.LOST:
                         throttle *= 0.3
                         steering *= 0.3
                     elif state == PursuitState.SEARCH:
@@ -517,24 +574,20 @@ class AutoDriveApp:
                     buttons = ctrl.buttons
 
             # 6. Apply inversions for ESP32 (invertThrottle=-1, invertSteering=-1)
-            if self.mode == MODE_AUTO:
-                # AUTO click-to-point — tested and working with both negated
-                throttle = -throttle
-                steering = -steering
-            elif self.mode == MODE_INTERCEPT:
-                # INTERCEPT uses IMU heading — steering needs negation, throttle does NOT
-                # (IMU forward is opposite to ArUco forward due to marker orientation)
+            # The ESP32 applies its own invertThrottle=-1 and invertSteering=-1
+            # so we pre-negate to cancel that out, then the ESC gets the right sign
+            if self.mode in (MODE_AUTO, MODE_INTERCEPT, MODE_INTERCEPT_CHARGE):
                 steering = -steering
 
             if self.mode == MODE_AUTO:
                 with self.shared_state["lock"]:
                     t_mix = self.shared_state.get("throttle_mix", 0.6)
                     s_mix = self.shared_state.get("steering_mix", 0.8)
-                throttle *= t_mix
+                # Full throttle when driving straight — no mix scaling
+                # Only scale steering to prevent wild swerves
                 steering *= s_mix
 
-                # Boost past ESC dead zone, but scale with heading error
-                # to avoid overshooting on small corrections
+                # Boost past ESC dead zone
                 min_throttle = 0.25
                 if 0 < abs(throttle) < min_throttle:
                     throttle = min_throttle if throttle > 0 else -min_throttle
@@ -561,6 +614,12 @@ class AutoDriveApp:
                     steering = min_steering if steering > 0 else -min_steering
 
             # 7. Send motor command
+            if self.mode in (MODE_AUTO, MODE_INTERCEPT_CHARGE) and (abs(throttle) > 0.01 or abs(steering) > 0.01):
+                if not hasattr(self, '_cmd_log_t'):
+                    self._cmd_log_t = 0
+                if now - self._cmd_log_t > 1.0:
+                    self._cmd_log_t = now
+                    print(f"[cmd] SENDING thr={throttle:.2f} str={steering:.2f} mode={self.mode}")
             self.comms.send(throttle, steering, buttons)
 
             # 8. Update dashboard state
@@ -597,7 +656,8 @@ class AutoDriveApp:
                         MODE_AUTO: (0, 255, 0),
                         MODE_MANUAL: (0, 200, 255),
                         MODE_CALIBRATING: (0, 255, 255),
-                        MODE_INTERCEPT: (0, 0, 255),
+                        MODE_INTERCEPT: (0, 165, 255),
+                        MODE_INTERCEPT_CHARGE: (0, 0, 255),
                     }.get(self.mode, (200, 200, 200))
                     cv2.putText(
                         stream_frame, f"Mode: {self.mode.upper()}", (10, 30),
@@ -672,6 +732,36 @@ class AutoDriveApp:
                             self.running = False
                         elif key == ord("p"):
                             self._handle_calibration({"action": "floor_plane"})
+                        elif key == ord("a"):
+                            # Auto-detect arena walls
+                            if frame is not None:
+                                from floor_plane import auto_detect_arena, FloorPlaneDetector
+                                points = auto_detect_arena(frame, num_points=8)
+                                if points:
+                                    detector = FloorPlaneDetector()
+                                    rgb_size = (frame.shape[1], frame.shape[0])
+                                    if detector.calibrate_from_corners(points, rgb_size=rgb_size):
+                                        import os
+                                        floor_path = os.path.join(
+                                            os.path.dirname(os.path.abspath(__file__)),
+                                            "floor_calibration.json"
+                                        )
+                                        self.tracker.load_floor_plane(floor_path)
+                                        self._floor_det = detector
+                                        self._filtered_heading = None
+                                        self._filtered_x = None
+                                        self._filtered_y = None
+                                        # Update enemy detector arena mask
+                                        import json
+                                        with open(floor_path) as f:
+                                            corners_px = json.load(f).get("corners_px")
+                                        if corners_px:
+                                            self._enemy_tracker.detector.set_arena_corners(corners_px)
+                                        print("[main] Auto-detected arena walls — calibration applied")
+                                    else:
+                                        print("[main] Auto-detect found walls but calibration failed")
+                                else:
+                                    print("[main] Auto-detect failed — try manual calibration (p)")
                         elif key == ord("r"):
                             # Recapture reference frame
                             if frame is not None:
@@ -680,7 +770,7 @@ class AutoDriveApp:
                                 print("[main] Reference frame recaptured")
                         elif key == ord("i"):
                             # Toggle intercept mode
-                            if self.mode == MODE_INTERCEPT:
+                            if self.mode in (MODE_INTERCEPT, MODE_INTERCEPT_CHARGE):
                                 self.mode = MODE_IDLE
                                 self._pursuit_fsm.reset()
                                 self.comms.stop()
@@ -689,7 +779,18 @@ class AutoDriveApp:
                                 self.mode = MODE_INTERCEPT
                                 self._pursuit_fsm.reset()
                                 self._enemy_tracker.reset()
-                                print("[main] Intercept mode ON — tracking enemy")
+                                print("[main] Intercept TRACKING — press SPACE to charge")
+                        elif key == ord(" "):
+                            # SPACE — trigger charge from tracking mode
+                            if self.mode == MODE_INTERCEPT and self._enemy_tracker.is_tracking:
+                                self.mode = MODE_INTERCEPT_CHARGE
+                                self._pursuit_fsm.reset()
+                                print("[main] CHARGE! Pursuing enemy")
+                            elif self.mode == MODE_INTERCEPT_CHARGE:
+                                # SPACE again — stop charging, go back to tracking
+                                self.mode = MODE_INTERCEPT
+                                self.comms.stop()
+                                print("[main] Charge stopped — back to tracking")
 
             # 9. FPS tracking
             self._fps_count += 1

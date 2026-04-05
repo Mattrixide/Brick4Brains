@@ -285,14 +285,46 @@ class FloorPlaneDetector:
         return self._compute_homography(pixel_corners, world_corners, rgb_size)
 
     def calibrate_from_corners(self, corners, rgb_size=(1280, 720)):
-        """Calibrate from 4 manually-clicked corners (no 3D, assumes rectangular arena)."""
+        """Calibrate from clicked corners (at least 4, assumes rectangular arena).
+
+        If exactly 4 corners: maps to TL, TR, BR, BL of arena.
+        If more: distributes points evenly along the arena perimeter.
+        """
         pixel_corners = [[float(c[0]), float(c[1])] for c in corners]
-        world_corners = [
-            [0, 0],
-            [ARENA_WIDTH_FT, 0],
-            [ARENA_WIDTH_FT, ARENA_HEIGHT_FT],
-            [0, ARENA_HEIGHT_FT],
-        ]
+        n = len(pixel_corners)
+
+        if n == 4:
+            world_corners = [
+                [0, 0],
+                [ARENA_WIDTH_FT, 0],
+                [ARENA_WIDTH_FT, ARENA_HEIGHT_FT],
+                [0, ARENA_HEIGHT_FT],
+            ]
+        else:
+            # Distribute points along arena perimeter
+            w, h = ARENA_WIDTH_FT, ARENA_HEIGHT_FT
+            perimeter = 2 * (w + h)
+            # Build perimeter path: TL→TR→BR→BL→TL
+            edges = [
+                ([0, 0], [w, 0], w),          # top
+                ([w, 0], [w, h], h),           # right
+                ([w, h], [0, h], w),           # bottom
+                ([0, h], [0, 0], h),           # left
+            ]
+            world_corners = []
+            for i in range(n):
+                t = i / n * perimeter
+                # Walk along edges to find position at distance t
+                walked = 0
+                for (start, end, length) in edges:
+                    if walked + length >= t:
+                        frac = (t - walked) / length
+                        wx = start[0] + frac * (end[0] - start[0])
+                        wy = start[1] + frac * (end[1] - start[1])
+                        world_corners.append([wx, wy])
+                        break
+                    walked += length
+
         return self._compute_homography(pixel_corners, world_corners, rgb_size)
 
     def _compute_homography(self, pixel_corners, world_corners_ft, rgb_size):
@@ -302,13 +334,17 @@ class FloorPlaneDetector:
         px = np.array(pixel_corners, dtype=np.float32)
         wx = np.array(world_corners_ft, dtype=np.float32)
 
-        if len(px) != 4 or len(wx) != 4:
-            print("Need exactly 4 corner points")
+        if len(px) < 4 or len(wx) < 4:
+            print("Need at least 4 corner points")
             return False
 
-        self.floor_corners_px = px
-        self.floor_corners_ft = wx
+        # Use convex hull for the arena boundary polygon (for grid drawing)
+        # This ensures all points are included, not just the first 4
+        hull_idx = cv2.convexHull(px.reshape(-1, 1, 2), returnPoints=False).flatten()
+        self.floor_corners_px = px[hull_idx]
+        self.floor_corners_ft = wx[hull_idx]
 
+        # Homography uses ALL points for best fit
         self.homography, _ = cv2.findHomography(px, wx)
         self.inv_homography, _ = cv2.findHomography(wx, px)
 
@@ -354,36 +390,35 @@ class FloorPlaneDetector:
     # ------------------------------------------------------------------
 
     def _precompute_grid(self):
-        """Precompute grid lines for the arena quadrilateral.
+        """Precompute grid lines covering the arena area.
 
-        Uses bilinear interpolation across the quad so grids work
-        correctly for non-rectangular arenas.
+        Uses world coordinate bounding box — works with any number of corners.
         """
         if not self.calibrated or self.floor_corners_ft is None:
             return
 
-        corners_ft = self.floor_corners_ft  # TL, TR, BR, BL
+        # World coordinate bounding box
+        wx_min = float(self.floor_corners_ft[:, 0].min())
+        wx_max = float(self.floor_corners_ft[:, 0].max())
+        wy_min = float(self.floor_corners_ft[:, 1].min())
+        wy_max = float(self.floor_corners_ft[:, 1].max())
 
         lines = []
         n = GRID_DIVISIONS
 
+        # Vertical lines (constant x, varying y)
         for i in range(n + 1):
-            u = i / n
-            # Vertical line: interpolate along top edge and bottom edge
-            top_pt = corners_ft[0] * (1 - u) + corners_ft[1] * u
-            bot_pt = corners_ft[3] * (1 - u) + corners_ft[2] * u
-            p1 = self.world_to_pixel(float(top_pt[0]), float(top_pt[1]))
-            p2 = self.world_to_pixel(float(bot_pt[0]), float(bot_pt[1]))
+            wx = wx_min + (wx_max - wx_min) * i / n
+            p1 = self.world_to_pixel(wx, wy_min)
+            p2 = self.world_to_pixel(wx, wy_max)
             if p1 and p2:
                 lines.append((p1, p2))
 
+        # Horizontal lines (constant y, varying x)
         for i in range(n + 1):
-            v = i / n
-            # Horizontal line: interpolate along left edge and right edge
-            left_pt = corners_ft[0] * (1 - v) + corners_ft[3] * v
-            right_pt = corners_ft[1] * (1 - v) + corners_ft[2] * v
-            p1 = self.world_to_pixel(float(left_pt[0]), float(left_pt[1]))
-            p2 = self.world_to_pixel(float(right_pt[0]), float(right_pt[1]))
+            wy = wy_min + (wy_max - wy_min) * i / n
+            p1 = self.world_to_pixel(wx_min, wy)
+            p2 = self.world_to_pixel(wx_max, wy)
             if p1 and p2:
                 lines.append((p1, p2))
 
@@ -442,6 +477,150 @@ class FloorPlaneDetector:
 
 
 # ======================================================================
+# Auto-detect arena walls
+# ======================================================================
+
+def auto_detect_arena(frame, min_area_frac=0.05, max_area_frac=0.8,
+                      num_points=8, debug=False):
+    """Detect arena walls from a camera frame.
+
+    Finds the largest rectangular-ish contour that looks like an arena floor.
+    Returns list of (x, y) pixel points along the boundary, or None.
+
+    Args:
+        frame: BGR camera frame
+        min_area_frac: minimum contour area as fraction of frame
+        max_area_frac: maximum contour area as fraction of frame
+        num_points: number of points to place along the boundary
+        debug: if True, show intermediate steps
+    """
+    gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+    h, w = gray.shape
+    total_area = h * w
+
+    # Try multiple approaches and pick the best contour
+
+    # Approach 1: Adaptive threshold (good for textured floors)
+    blur = cv2.GaussianBlur(gray, (7, 7), 0)
+    thresh = cv2.adaptiveThreshold(blur, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
+                                    cv2.THRESH_BINARY, 51, 5)
+
+    # Approach 2: Canny edges + dilation to close gaps
+    edges = cv2.Canny(blur, 30, 100)
+    kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (5, 5))
+    edges_closed = cv2.dilate(edges, kernel, iterations=2)
+    edges_closed = cv2.erode(edges_closed, kernel, iterations=1)
+
+    # Try both and pick whichever gives a better arena contour
+    best_contour = None
+    best_score = 0
+
+    for mask in [thresh, edges_closed]:
+        # Invert if needed (arena should be the filled region)
+        for inv in [False, True]:
+            m = cv2.bitwise_not(mask) if inv else mask
+
+            # Morphological close to fill small gaps
+            m = cv2.morphologyEx(m, cv2.MORPH_CLOSE,
+                                  cv2.getStructuringElement(cv2.MORPH_RECT, (15, 15)))
+
+            contours, _ = cv2.findContours(m, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+
+            for c in contours:
+                area = cv2.contourArea(c)
+                frac = area / total_area
+
+                if frac < min_area_frac or frac > max_area_frac:
+                    continue
+
+                # Approximate to polygon
+                peri = cv2.arcLength(c, True)
+                approx = cv2.approxPolyDP(c, 0.02 * peri, True)
+
+                # Score: prefer 4-sided, large, convex shapes
+                n_sides = len(approx)
+                if n_sides < 4:
+                    continue
+
+                hull = cv2.convexHull(c)
+                hull_area = cv2.contourArea(hull)
+                solidity = area / hull_area if hull_area > 0 else 0
+
+                # Rectangularity: area / bounding rect area
+                rect = cv2.minAreaRect(c)
+                rect_area = rect[1][0] * rect[1][1]
+                rectangularity = area / rect_area if rect_area > 0 else 0
+
+                score = frac * solidity * rectangularity
+                if n_sides == 4:
+                    score *= 1.5  # bonus for quadrilateral
+
+                if score > best_score:
+                    best_score = score
+                    best_contour = c
+
+    if best_contour is None:
+        print("[auto-detect] No arena contour found")
+        return None
+
+    # Get the convex hull for clean boundary
+    hull = cv2.convexHull(best_contour)
+
+    # Sample points evenly along the hull perimeter
+    peri = cv2.arcLength(hull, True)
+    points = []
+
+    # Walk along the hull contour and sample at even intervals
+    hull_pts = hull.reshape(-1, 2)
+    n_hull = len(hull_pts)
+
+    # Calculate cumulative distances along hull
+    cum_dist = [0.0]
+    for i in range(1, n_hull):
+        d = np.linalg.norm(hull_pts[i].astype(float) - hull_pts[i-1].astype(float))
+        cum_dist.append(cum_dist[-1] + d)
+    # Close the loop
+    cum_dist.append(cum_dist[-1] + np.linalg.norm(
+        hull_pts[0].astype(float) - hull_pts[-1].astype(float)))
+    total_dist = cum_dist[-1]
+
+    for i in range(num_points):
+        target_dist = total_dist * i / num_points
+
+        # Find which segment this falls on
+        for j in range(len(cum_dist) - 1):
+            if cum_dist[j] <= target_dist <= cum_dist[j+1]:
+                seg_len = cum_dist[j+1] - cum_dist[j]
+                if seg_len < 0.01:
+                    frac = 0
+                else:
+                    frac = (target_dist - cum_dist[j]) / seg_len
+                p1 = hull_pts[j % n_hull].astype(float)
+                p2 = hull_pts[(j+1) % n_hull].astype(float)
+                pt = p1 + frac * (p2 - p1)
+                points.append((int(pt[0]), int(pt[1])))
+                break
+
+    if debug:
+        vis = frame.copy()
+        cv2.drawContours(vis, [best_contour], -1, (255, 0, 0), 2)
+        cv2.drawContours(vis, [hull], -1, (0, 255, 0), 2)
+        for i, (px, py) in enumerate(points):
+            cv2.circle(vis, (px, py), 8, (0, 255, 255), -1)
+            cv2.putText(vis, str(i+1), (px+10, py-5),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 255), 1)
+        cv2.imshow("Auto-Detect Debug", vis)
+        cv2.waitKey(0)
+        cv2.destroyWindow("Auto-Detect Debug")
+
+    area_frac = cv2.contourArea(best_contour) / total_area
+    print(f"[auto-detect] Found arena: {len(points)} points, "
+          f"{area_frac*100:.0f}% of frame, score={best_score:.3f}")
+
+    return points
+
+
+# ======================================================================
 # Interactive single-marker calibration (live stream + click)
 # ======================================================================
 
@@ -449,26 +628,48 @@ _click_points = []
 _click_world = []  # world coords for each click
 
 
+_pose_drag_state = {"dragging": -1, "hover": -1}
+_POSE_GRAB_DIST = 15
+
 def _pose_click_callback(event, x, y, flags, param):
-    """Mouse callback for corner selection with 3D projection."""
+    """Mouse callback for corner selection with 3D projection. Supports drag."""
     global _click_points, _click_world
-    if event != cv2.EVENT_LBUTTONDOWN:
-        return
-    if len(_click_points) >= 4:
-        return
-
     camera_matrix, rvec, tvec = param
-    world = pixel_to_floor_3d(x, y, camera_matrix, rvec, tvec)
-    if world is None:
-        print(f"  Click ({x}, {y}) -- above horizon, try clicking lower")
-        return
+    s = _pose_drag_state
 
-    wx_mm, wy_mm = world
-    wx_ft, wy_ft = wx_mm / MM_PER_UNIT, wy_mm / MM_PER_UNIT
-    _click_points.append((x, y))
-    _click_world.append((wx_mm, wy_mm))
-    print(f"  Corner {len(_click_points)}: pixel ({x}, {y}) -> "
-          f"({wx_ft:.2f}, {wy_ft:.2f}) ft  ({wx_mm:.0f}, {wy_mm:.0f}) mm")
+    if event == cv2.EVENT_MOUSEMOVE:
+        s["hover"] = -1
+        for i, (px, py) in enumerate(_click_points):
+            if abs(x - px) < _POSE_GRAB_DIST and abs(y - py) < _POSE_GRAB_DIST:
+                s["hover"] = i
+                break
+        if s["dragging"] >= 0:
+            # Update dragged point
+            world = pixel_to_floor_3d(x, y, camera_matrix, rvec, tvec)
+            if world is not None:
+                _click_points[s["dragging"]] = (x, y)
+                _click_world[s["dragging"]] = world
+
+    elif event == cv2.EVENT_LBUTTONDOWN:
+        # Check if grabbing existing point
+        for i, (px, py) in enumerate(_click_points):
+            if abs(x - px) < _POSE_GRAB_DIST and abs(y - py) < _POSE_GRAB_DIST:
+                s["dragging"] = i
+                return
+        # New point
+        world = pixel_to_floor_3d(x, y, camera_matrix, rvec, tvec)
+        if world is None:
+            print(f"  Click ({x}, {y}) -- above horizon, try clicking lower")
+            return
+        wx_mm, wy_mm = world
+        wx_ft, wy_ft = wx_mm / MM_PER_UNIT, wy_mm / MM_PER_UNIT
+        _click_points.append((x, y))
+        _click_world.append((wx_mm, wy_mm))
+        print(f"  Point {len(_click_points)}: pixel ({x}, {y}) -> "
+              f"({wx_ft:.2f}, {wy_ft:.2f}) ft  ({wx_mm:.0f}, {wy_mm:.0f}) mm")
+
+    elif event == cv2.EVENT_LBUTTONUP:
+        s["dragging"] = -1
 
 
 def run_single_marker_calibration(cam, camera_matrix, dist_coeffs):
@@ -561,7 +762,7 @@ def run_single_marker_calibration(cam, camera_matrix, dist_coeffs):
             rvec = r.copy()
             tvec = t.copy()
             pose_locked = True
-            print("Camera pose locked! Now click 4 arena corners.")
+            print("Camera pose locked! Click arena corners (at least 4, drag to adjust).")
             print("You can remove the marker from the floor.\n")
 
     # Phase 2: Click 4 arena corners on live feed
@@ -593,23 +794,29 @@ def run_single_marker_calibration(cam, camera_matrix, dist_coeffs):
             if i > 0:
                 cv2.line(vis, _click_points[i-1], (cx, cy), (0, 200, 0), 2, cv2.LINE_AA)
 
-        # Close quad and fill
-        if len(_click_points) == 4:
-            cv2.line(vis, _click_points[3], _click_points[0], (0, 200, 0), 2, cv2.LINE_AA)
+        # Close polygon and fill
+        n_pts = len(_click_points)
+        if n_pts >= 3:
+            cv2.line(vis, _click_points[-1], _click_points[0], (0, 200, 0), 2, cv2.LINE_AA)
             overlay = vis.copy()
             pts = np.array(_click_points, dtype=np.int32).reshape((-1, 1, 2))
             cv2.fillPoly(overlay, [pts], (0, 60, 0))
             cv2.addWeighted(overlay, 0.3, vis, 0.7, 0, vis)
 
-        # HUD
-        if len(_click_points) < 4:
-            instruction = f"Click corner {len(_click_points)+1} of 4"
-        else:
-            instruction = "ENTER=confirm  BACKSPACE=undo"
+        # Highlight hovered point
+        if _pose_drag_state["hover"] >= 0:
+            hx, hy = _click_points[_pose_drag_state["hover"]]
+            cv2.circle(vis, (hx, hy), 12, (0, 200, 255), 2)
 
-        cv2.putText(vis, "PHASE 2: Click 4 arena corners", (11, 31),
+        # HUD
+        if n_pts < 4:
+            instruction = f"Click point {n_pts+1} (need at least 4)"
+        else:
+            instruction = f"{n_pts} points | ENTER=confirm  Click=add more"
+
+        cv2.putText(vis, "PHASE 2: Click arena corners (drag to adjust)", (11, 31),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.65, (0, 0, 0), 2)
-        cv2.putText(vis, "PHASE 2: Click 4 arena corners", (10, 30),
+        cv2.putText(vis, "PHASE 2: Click arena corners (drag to adjust)", (10, 30),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.65, (0, 255, 255), 1)
         cv2.putText(vis, instruction, (11, 61),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 0), 2)
@@ -631,7 +838,7 @@ def run_single_marker_calibration(cam, camera_matrix, dist_coeffs):
             removed_px = _click_points.pop()
             removed_w = _click_world.pop()
             print(f"  Undid corner at ({removed_px[0]}, {removed_px[1]})")
-        elif key == 13 and len(_click_points) == 4:  # ENTER
+        elif key == 13 and len(_click_points) >= 4:  # ENTER
             break
 
     # Build initial detector from clicked corners
@@ -797,64 +1004,122 @@ def run_single_marker_calibration(cam, camera_matrix, dist_coeffs):
 _simple_click_corners = []
 
 
-def _simple_click_callback(event, x, y, flags, param):
-    global _simple_click_corners
-    if event == cv2.EVENT_LBUTTONDOWN and len(_simple_click_corners) < 4:
-        _simple_click_corners.append((x, y))
-        print(f"  Corner {len(_simple_click_corners)}: ({x}, {y})")
+_drag_state = {
+    "points": [],
+    "dragging": -1,     # index of point being dragged, -1 = none
+    "hover": -1,        # index of point under cursor
+}
+_DRAG_RADIUS = 12       # pixels — click within this to grab a point
+
+
+def _corner_mouse_callback(event, x, y, flags, param):
+    s = _drag_state
+    grab_dist = _DRAG_RADIUS
+
+    if event == cv2.EVENT_MOUSEMOVE:
+        # Check hover
+        s["hover"] = -1
+        for i, (px, py) in enumerate(s["points"]):
+            if abs(x - px) < grab_dist and abs(y - py) < grab_dist:
+                s["hover"] = i
+                break
+        # Drag
+        if s["dragging"] >= 0:
+            s["points"][s["dragging"]] = (x, y)
+
+    elif event == cv2.EVENT_LBUTTONDOWN:
+        # Check if clicking on existing point to drag
+        for i, (px, py) in enumerate(s["points"]):
+            if abs(x - px) < grab_dist and abs(y - py) < grab_dist:
+                s["dragging"] = i
+                return
+        # New point
+        s["points"].append((x, y))
+        print(f"  Point {len(s['points'])}: ({x}, {y})")
+
+    elif event == cv2.EVENT_LBUTTONUP:
+        s["dragging"] = -1
 
 
 def run_corner_calibration(frame, rgb_size=None):
-    """Fallback: click 4 corners on a frozen frame (assumes rectangular arena)."""
-    global _simple_click_corners
+    """Click arena corners on a frozen frame. Supports dragging and unlimited points.
 
+    Controls:
+        Left click:  Place new point / grab existing point to drag
+        Backspace:   Remove last point
+        ENTER:       Confirm (need at least 4 points)
+        ESC:         Cancel
+    """
     if rgb_size is None:
         rgb_size = (frame.shape[1], frame.shape[0])
 
-    _simple_click_corners = []
+    _drag_state["points"] = []
+    _drag_state["dragging"] = -1
+    _drag_state["hover"] = -1
     frozen = frame.copy()
 
     cv2.namedWindow(_CALIB_WINDOW)
-    cv2.setMouseCallback(_CALIB_WINDOW, _simple_click_callback)
+    cv2.setMouseCallback(_CALIB_WINDOW, _corner_mouse_callback)
 
-    print("\n--- Floor Calibration (manual click) ---")
-    print("Click 4 corners: TL, TR, BR, BL. ENTER=confirm, ESC=cancel.\n")
+    print("\n--- Floor Calibration ---")
+    print("Click corners around the arena perimeter (at least 4).")
+    print("Drag points to adjust. BACKSPACE=undo, ENTER=confirm, ESC=cancel.\n")
 
     while True:
         vis = frozen.copy()
+        pts = _drag_state["points"]
+        n = len(pts)
 
-        for i, (cx, cy) in enumerate(_simple_click_corners):
-            cv2.circle(vis, (cx, cy), 8, (0, 255, 255), -1)
-            cv2.putText(vis, str(i+1), (cx+12, cy-8),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 1)
-            if i > 0:
-                cv2.line(vis, _simple_click_corners[i-1], (cx, cy), (0, 200, 0), 2)
-
-        if len(_simple_click_corners) == 4:
-            cv2.line(vis, _simple_click_corners[3], _simple_click_corners[0], (0, 200, 0), 2)
+        # Draw polygon fill if >= 3 points
+        if n >= 3:
             overlay = vis.copy()
-            pts = np.array(_simple_click_corners, dtype=np.int32).reshape((-1, 1, 2))
-            cv2.fillPoly(overlay, [pts], (0, 60, 0))
+            poly = np.array(pts, dtype=np.int32).reshape((-1, 1, 2))
+            cv2.fillPoly(overlay, [poly], (0, 60, 0))
             cv2.addWeighted(overlay, 0.3, vis, 0.7, 0, vis)
 
-        n = len(_simple_click_corners)
-        label = f"Click corner {n+1}/4" if n < 4 else "ENTER=confirm  BACKSPACE=undo"
-        cv2.putText(vis, label, (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 1)
+        # Draw edges
+        for i in range(n):
+            j = (i + 1) % n
+            if j < n:
+                cv2.line(vis, pts[i], pts[j], (0, 200, 0), 2)
+        if n >= 3:
+            cv2.line(vis, pts[-1], pts[0], (0, 200, 0), 2)
+
+        # Draw points
+        for i, (cx, cy) in enumerate(pts):
+            color = (0, 200, 255) if i == _drag_state["hover"] else (0, 255, 255)
+            radius = 10 if i == _drag_state["hover"] else 7
+            cv2.circle(vis, (cx, cy), radius, color, -1)
+            cv2.circle(vis, (cx, cy), radius, (0, 0, 0), 1)
+            cv2.putText(vis, str(i+1), (cx+14, cy-8),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 1)
+
+        # Status
+        if n < 4:
+            label = f"Click point {n+1} (need at least 4)"
+        else:
+            label = f"{n} points | ENTER=confirm  BACKSPACE=undo  Click=add more"
+        cv2.putText(vis, label, (10, 25), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 255, 255), 1)
+
+        if _drag_state["dragging"] >= 0:
+            cv2.putText(vis, "DRAGGING", (10, 50), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 165, 255), 1)
+
         cv2.imshow(_CALIB_WINDOW, vis)
 
         key = cv2.waitKey(30) & 0xFF
         if key == 27:
             _destroy_calib_window()
             return None
-        elif key == 8 and _simple_click_corners:
-            _simple_click_corners.pop()
-        elif key == 13 and len(_simple_click_corners) == 4:
+        elif key == 8 and pts:  # backspace
+            pts.pop()
+            _drag_state["dragging"] = -1
+        elif key == 13 and n >= 4:  # enter
             break
 
     _destroy_calib_window()
 
     detector = FloorPlaneDetector()
-    if detector.calibrate_from_corners(_simple_click_corners, rgb_size=rgb_size):
+    if detector.calibrate_from_corners(pts, rgb_size=rgb_size):
         return detector
     return None
 

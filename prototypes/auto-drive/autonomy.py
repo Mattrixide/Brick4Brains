@@ -164,7 +164,7 @@ class PathFollower:
         waypoint_threshold_cm: float = 5.0,
         heading_threshold_rad: float = 0.26,
         max_steer_slew: float = 0.15,
-        turn_in_place_threshold_rad: float = 0.5,  # ~30 degrees
+        turn_in_place_threshold_rad: float = 1.57,  # ~90 degrees — only stop for completely wrong direction
     ):
         self._heading_pid = PIDController(kp=heading_kp, kd=heading_kd)
         self._throttle_kp = throttle_kp
@@ -265,13 +265,16 @@ class PathFollower:
             )
             return 0.0, steering, False, status
 
-        # Phase 2: Heading roughly aligned — drive forward with minor corrections
+        # Phase 2: Drive toward target — full speed, steer while driving
         steering = self._heading_pid.update(heading_error, dt)
         steering = max(-1.0, min(1.0, steering))
         steering = self._slew_limit(steering)
 
-        # Throttle proportional to distance, capped
-        throttle = self._throttle_kp * min(distance / 30.0, 1.0)
+        # Full throttle — only slow down in last 10cm
+        if distance < 10.0:
+            throttle = self._throttle_kp * (distance / 10.0)
+        else:
+            throttle = self._throttle_kp
         throttle = max(-1.0, min(1.0, throttle))
 
         status = (
@@ -329,7 +332,7 @@ class IMUAssistedPathFollower(PathFollower):
         waypoint_threshold_cm: float = 5.0,
         heading_threshold_rad: float = 0.26,
         max_steer_slew: float = 0.15,
-        turn_in_place_threshold_rad: float = 0.5,
+        turn_in_place_threshold_rad: float = 1.57,
         max_speed: float = 1.0,
         decel_distance_cm: float = 15.0,
     ):
@@ -357,10 +360,13 @@ class IMUAssistedPathFollower(PathFollower):
         self._phase = self.PHASE_TURN
 
     def _use_imu_turn(self) -> bool:
-        """Check if IMU-assisted turning is available."""
-        return (self._comms is not None and
-                hasattr(self._comms, 'send_turn') and
-                not self._comms._dry_run)
+        """Check if IMU-assisted turning is available.
+
+        Disabled — ESP32 turn command deduplication causes issues with
+        repeated goto commands. Vision-only PID works well for click-to-point.
+        IMU turns used separately in intercept mode via direct steering.
+        """
+        return False
 
     def update(
         self, x_cm: float, y_cm: float, heading_rad: float, dt: float

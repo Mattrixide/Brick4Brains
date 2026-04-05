@@ -13,7 +13,9 @@ Usage:
 """
 
 import argparse
+import json
 import math
+import os
 import time
 import threading
 from collections import deque
@@ -113,6 +115,17 @@ class AutoDriveApp:
         self._imu_poller = None  # started later if ESP32 is connected
         self._last_telemetry_time = 0.0
 
+        # Heading-hold PID (IMU-based micro-corrections for straight driving)
+        self._heading_hold_enabled = False
+        self._heading_hold_target = None  # target heading in degrees (IMU frame)
+        self._heading_hold_kp = 0.04
+        self._heading_hold_ki = 0.0004
+        self._heading_hold_kd = 0.003
+        self._heading_hold_bias = 0.0
+        self._heading_hold_integral = 0.0
+        self._heading_hold_prev_error = 0.0
+        self._load_drive_calibration()
+
         # Enemy tracking + interception
         self._enemy_tracker = EnemyTracker(dt=1/30, sigma_a=2.0, sigma_meas_cm=5.0)
         self._pursuit_fsm = PursuitFSM()
@@ -143,7 +156,6 @@ class AutoDriveApp:
         self.tracker.set_scale(args.px_per_cm)
 
         # Generate ChArUco board image for printing
-        import os
         self._charuco_path = os.path.join(
             os.path.dirname(os.path.abspath(__file__)), "charuco_board.png"
         )
@@ -158,15 +170,16 @@ class AutoDriveApp:
 
         # Start camera
         cam_label = "OAK-D Pro" if self.args.oakd else f"camera {self.args.camera}"
+        target_fps = self.args.fps
         if self.args.mono:
-            cam_label += " (mono 120fps)"
+            cam_label += f" (mono {target_fps:.0f}fps)"
         print(f"\n[camera] Opening {cam_label} ...")
         self.camera = create_camera(
             src=self.args.camera,
             resolution_index=1,  # 720p
             use_oakd=self.args.oakd,
             use_mono=self.args.mono,
-            target_fps=120.0 if self.args.mono else self.args.fps,
+            target_fps=target_fps,
         ).start()
         time.sleep(0.5)  # let camera warm up
         print(f"[camera] Running at {self.camera.fps:.0f} fps")
@@ -198,7 +211,6 @@ class AutoDriveApp:
         self._calibrate_origin()
 
         # Try to load saved calibration (floor plane first, then legacy homography)
-        import os
         floor_path = os.path.join(
             os.path.dirname(os.path.abspath(__file__)), "floor_calibration.json"
         )
@@ -214,7 +226,6 @@ class AutoDriveApp:
             self.tracker.load_homography(legacy_path)
 
         # Load arena corners for enemy detection masking
-        import json, os
         floor_path = os.path.join(
             os.path.dirname(os.path.abspath(__file__)), "floor_calibration.json"
         )
@@ -225,10 +236,20 @@ class AutoDriveApp:
             if corners_px:
                 self._enemy_tracker.detector.set_arena_corners(corners_px)
 
-        # Capture reference frame (empty arena) for enemy detection
-        ref_frame = self.camera.read()
-        if ref_frame is not None:
-            self._enemy_tracker.detector.capture_reference(ref_frame)
+        # Load saved reference frame (empty arena) for static enemy detection
+        # Press 'r' during runtime to capture a new one when arena is empty
+        ref_path = os.path.join(
+            os.path.dirname(os.path.abspath(__file__)), "arena_reference.png"
+        )
+        if os.path.exists(ref_path):
+            saved_ref = cv2.imread(ref_path, cv2.IMREAD_GRAYSCALE)
+            if saved_ref is not None:
+                self._enemy_tracker.detector._reference_gray = cv2.GaussianBlur(
+                    saved_ref, (5, 5), 0
+                )
+                print(f"[enemy] Loaded saved reference frame from {ref_path}")
+        else:
+            print("[enemy] No saved reference — press 'r' with empty arena to capture one")
 
         # Start IMU telemetry receiver
         self._telemetry.start()
@@ -293,6 +314,104 @@ class AutoDriveApp:
             print(f"[tracker] Origin set to frame center ({w//2}, {h//2})")
         else:
             print("[tracker] WARNING: no frames available")
+
+    def _load_drive_calibration(self):
+        """Load heading-hold PID calibration from drive_calibration.json."""
+        cal_path = os.path.join(
+            os.path.dirname(os.path.abspath(__file__)), "drive_calibration.json"
+        )
+        if os.path.exists(cal_path):
+            try:
+                with open(cal_path) as f:
+                    cal = json.load(f)
+                self._heading_hold_kp = cal.get("heading_hold_kp", self._heading_hold_kp)
+                self._heading_hold_ki = cal.get("heading_hold_ki", self._heading_hold_ki)
+                self._heading_hold_kd = cal.get("heading_hold_kd", self._heading_hold_kd)
+                self._heading_hold_bias = cal.get("steering_bias", 0.0)
+                self._heading_hold_enabled = True
+                print(f"[heading-hold] Loaded calibration: "
+                      f"Kp={self._heading_hold_kp:.4f} Ki={self._heading_hold_ki:.6f} "
+                      f"Kd={self._heading_hold_kd:.4f} bias={self._heading_hold_bias:+.4f}")
+            except Exception as e:
+                print(f"[heading-hold] Failed to load calibration: {e}")
+        else:
+            print("[heading-hold] No drive_calibration.json found — run calibrate_drive.py first")
+
+    def _heading_hold_correction(self, throttle: float, steering: float, dt: float) -> float:
+        """Apply IMU-based heading-hold micro-correction to steering.
+
+        When driving forward (throttle > 0), locks the IMU heading at the start
+        of the drive and applies PID corrections to maintain that heading.
+        The navigation PID from autonomy.py sets the desired heading via
+        waypoint targeting; this layer keeps the robot tracking that heading
+        between camera frames using fast IMU feedback.
+
+        Returns adjusted steering value.
+        """
+        if not self._heading_hold_enabled:
+            return steering
+        if not self._imu_poller or not self._imu_poller.is_active:
+            return steering
+
+        imu_heading = self._imu_poller.get_yaw()
+
+        # Only apply heading-hold when driving mostly straight
+        # If nav PID is commanding large steering (turning), don't fight it
+        if abs(steering) > 0.3:
+            # Large turn commanded — release heading lock, let nav PID handle it
+            self._heading_hold_target = None
+            self._heading_hold_integral = 0.0
+            return steering
+
+        # When throttle goes from 0 to positive, lock the current heading
+        if abs(throttle) > 0.1:
+            if self._heading_hold_target is None:
+                # New drive segment — lock heading to current IMU reading
+                self._heading_hold_target = imu_heading
+                self._heading_hold_integral = 0.0
+                self._heading_hold_prev_error = 0.0
+            else:
+                # Slowly slew target toward current heading when nav steers
+                # This lets the nav PID adjust course without fighting
+                if abs(steering) > 0.02:
+                    heading_rate = steering * 60.0  # deg/s at full steering
+                    self._heading_hold_target += heading_rate * dt
+                    # Keep target near actual heading (don't let it run away)
+                    drift = self._heading_hold_target - imu_heading
+                    drift = (drift + 180.0) % 360.0 - 180.0
+                    if abs(drift) > 20.0:
+                        self._heading_hold_target = imu_heading
+        else:
+            # Not driving — release heading lock
+            self._heading_hold_target = None
+            self._heading_hold_integral = 0.0
+            return steering
+
+        # PID on heading error
+        error = self._heading_hold_target - imu_heading
+        # Wrap to [-180, 180]
+        error = (error + 180.0) % 360.0 - 180.0
+
+        self._heading_hold_integral += error * dt
+        # Tight anti-windup
+        self._heading_hold_integral = max(-5.0, min(5.0, self._heading_hold_integral))
+
+        derivative = (error - self._heading_hold_prev_error) / dt if dt > 0.001 else 0.0
+        self._heading_hold_prev_error = error
+
+        correction = (self._heading_hold_kp * error +
+                      self._heading_hold_ki * self._heading_hold_integral +
+                      self._heading_hold_kd * derivative +
+                      self._heading_hold_bias)
+
+        # Clamp correction to small micro-adjustments only
+        # This is a trim layer, not a steering controller
+        max_correction = 0.15
+        correction = max(-max_correction, min(max_correction, correction))
+
+        # Blend: add correction to nav steering
+        adjusted = steering + correction
+        return max(-1.0, min(1.0, adjusted))
 
     def _run_loop(self):
         """Core loop: track, decide, act."""
@@ -499,10 +618,9 @@ class AutoDriveApp:
                     desired_heading = math.atan2(
                         enemy_pos[1] - y_cm, enemy_pos[0] - x_cm
                     )
-                    if self._heading_fusion.is_calibrated:
-                        use_heading = self._heading_fusion.heading_rad
-                    else:
-                        use_heading = math.atan2(math.sin(heading_rad), math.cos(heading_rad))
+                    # Use the same heading source as MODE_AUTO (CV + EMA filtered)
+                    # Previously used IMU-fused heading which could diverge
+                    use_heading = math.atan2(math.sin(heading_rad), math.cos(heading_rad))
                     alpha = angle_diff(desired_heading, use_heading)
 
                     # HIT — check if enemy is near wall for pin
@@ -572,16 +690,22 @@ class AutoDriveApp:
                     if now - self._intercept_log_t > 0.5:
                         self._intercept_log_t = now
                         phase = "TURN" if abs(heading_error) > 2.6 else "ARC"
-                        src = "IMU" if self._heading_fusion.is_calibrated else "CV"
+                        src = "CV"
                         print(f"[intercept] {state} {phase} | "
                               f"robot=({x_cm:.0f},{y_cm:.0f}) hdg={math.degrees(use_heading):.0f}°[{src}] | "
                               f"enemy=({enemy_pos[0]:.0f},{enemy_pos[1]:.0f}) | "
                               f"dist={distance:.0f}cm herr={math.degrees(heading_error):.0f}° | "
                               f"thr={throttle:.2f} str={steering:.2f}")
                 elif not self._enemy_tracker.is_tracking:
-                    # No valid track — hold still
-                    throttle = 0.0
-                    steering = 0.0
+                    # No valid track — drive toward last known position
+                    # Don't stop immediately, coast forward for a bit
+                    if self._enemy_tracker.kalman.frames_without_detection < 180:
+                        # Coast toward last known enemy position
+                        throttle = 0.4
+                        steering = 0.0
+                    else:
+                        throttle = 0.0
+                        steering = 0.0
 
                 # Check: ArUco lost AND robot not moving → off visible area → reverse
                 if not detected:
@@ -733,6 +857,10 @@ class AutoDriveApp:
                 if min_steering > 0 and 0 < abs(steering) < min_steering:
                     steering = min_steering if steering > 0 else -min_steering
 
+            # 6b. Heading-hold micro-corrections (IMU-based)
+            if self.mode in (MODE_AUTO, MODE_INTERCEPT_CHARGE):
+                steering = self._heading_hold_correction(throttle, steering, dt)
+
             # 7. Send motor command
             if self.mode in (MODE_AUTO, MODE_INTERCEPT_CHARGE) and (abs(throttle) > 0.01 or abs(steering) > 0.01):
                 if not hasattr(self, '_cmd_log_t'):
@@ -883,7 +1011,6 @@ class AutoDriveApp:
                                     detector = FloorPlaneDetector()
                                     rgb_size = (frame.shape[1], frame.shape[0])
                                     if detector.calibrate_from_corners(points, rgb_size=rgb_size):
-                                        import os
                                         floor_path = os.path.join(
                                             os.path.dirname(os.path.abspath(__file__)),
                                             "floor_calibration.json"
@@ -894,7 +1021,6 @@ class AutoDriveApp:
                                         self._filtered_x = None
                                         self._filtered_y = None
                                         # Update enemy detector arena mask
-                                        import json
                                         with open(floor_path) as f:
                                             corners_px = json.load(f).get("corners_px")
                                         if corners_px:
@@ -905,11 +1031,19 @@ class AutoDriveApp:
                                 else:
                                     print("[main] Auto-detect failed — try manual calibration (p)")
                         elif key == ord("r"):
-                            # Recapture reference frame
+                            # Capture empty arena reference frame + save to disk
                             if frame is not None:
                                 self._enemy_tracker.detector.capture_reference(frame)
                                 self._enemy_tracker.reset()
-                                print("[main] Reference frame recaptured")
+                                ref_path = os.path.join(
+                                    os.path.dirname(os.path.abspath(__file__)),
+                                    "arena_reference.png"
+                                )
+                                ref_gray = self._enemy_tracker.detector._reference_gray
+                                if ref_gray is not None:
+                                    cv2.imwrite(ref_path, ref_gray)
+                                    print(f"[main] Reference frame saved to {ref_path}")
+                                print("[main] Reference frame captured — static enemies now detectable")
                         elif key == ord("i"):
                             # Toggle intercept mode
                             if self.mode in (MODE_INTERCEPT, MODE_INTERCEPT_CHARGE, MODE_PIN, MODE_REVERSE):
@@ -1040,7 +1174,6 @@ class AutoDriveApp:
 
     def _handle_calibration(self, cmd):
         """Process calibration commands."""
-        import os
         action = cmd.get("action")
         calib_path = os.path.join(
             os.path.dirname(os.path.abspath(__file__)), "homography.json"

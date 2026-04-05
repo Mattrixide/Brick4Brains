@@ -143,18 +143,17 @@ class DepthAICamera:
         self.resolution_index = resolution_index
         w, h = RESOLUTIONS[resolution_index]
 
-        # Mono cameras are 1280x800 native — adjust if requesting 720p
+        # OV9282 mono sensor modes (all global shutter):
+        #   1280x800: up to 60fps  (native, full sensor)
+        #   1280x720: up to 60fps  (cropped from 800p)
+        #   640x480:  up to 60fps  (cropped + scaled)
+        #   640x400:  up to 120fps (2x2 binned, better low-light)
+        #   480x300:  up to 120fps (binned + cropped)
         if use_mono:
-            # OV9282 FPS depends on resolution:
-            #   640x400: 120fps, 640x480: 90fps, 800x600: 60fps, 1280x800: 30fps
-            if target_fps > 90:
-                w, h = 640, 400   # 120fps
-            elif target_fps > 60:
-                w, h = 640, 480   # 90fps
-            elif target_fps > 30:
-                w, h = 800, 600   # 60fps
+            if target_fps > 60:
+                w, h = 640, 400   # 120fps binned mode
             else:
-                w, h = 1280, 800  # 30fps
+                w, h = 1280, 800  # 60fps full sensor (most pixels)
 
         self._frame: Optional[np.ndarray] = None
         self._lock = threading.Lock()

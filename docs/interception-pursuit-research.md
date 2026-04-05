@@ -1,512 +1,181 @@
-# Moving Object Interception & Pursuit Research
+# Interception & Pursuit Research: Practical Solutions
 
-**Project**: Brick for Brains - Autonomous Combat Robot
-**Context**: Differential-drive beetleweight in 8x8ft arena, ArUco-tracked (own robot), CV-detected enemy (no markers), overhead camera
-**Goal**: Intercept and ram enemy robot with <30ms decision latency at 60 FPS
-
----
+Research for B4B autonomous combat robot -- overhead camera tracking, enemy detection, smooth pursuit, and Kalman filter hardening.
 
 ## Table of Contents
-
-1. [Proportional Navigation Guidance](#1-proportional-navigation-guidance)
-2. [Intercept Point Calculation](#2-intercept-point-calculation)
-3. [Kalman Filter for Enemy Tracking](#3-kalman-filter-for-enemy-tracking)
-4. [Pure Pursuit vs Lead Pursuit](#4-pure-pursuit-vs-lead-pursuit)
-5. [Enemy Detection Without Markers](#5-enemy-detection-without-markers)
-6. [Prediction Under Uncertainty](#6-prediction-under-uncertainty)
-7. [Recommended Architecture](#7-recommended-architecture)
+1. [Enemy Detection Without Self-Interference](#1-enemy-detection-without-self-interference)
+2. [Smooth Pursuit Curves for Tank Drive](#2-smooth-pursuit-curves-for-tank-drive)
+3. [Kalman Filter Gating for Outlier Rejection](#3-kalman-filter-gating-for-outlier-rejection)
+4. [OAK-D Depth for Object Detection](#4-oak-d-depth-for-object-detection)
+5. [Concrete Code Changes for B4B](#5-concrete-code-changes-for-b4b)
 
 ---
 
-## 1. Proportional Navigation Guidance
+## 1. Enemy Detection Without Self-Interference
 
-### 1.1 Core Principle
+### Problem Recap
+When our robot moves fast, ArUco detection fails (motion blur), so we can't mask ourselves out of the reference diff. The enemy detection then latches onto our own robot's blob. When we get close to the enemy, the two blobs merge.
 
-Proportional Navigation (PN) is the dominant guidance law used in homing missiles, adapted here for ground robot interception. The fundamental insight: **two objects are on a collision course when their line-of-sight (LOS) angle does not change**. PN commands steering proportional to the LOS rotation rate to drive it to zero.
+### Solution A: Color-Based Self-Identification (Primary Recommendation)
 
-Source: [Wikipedia - Proportional Navigation](https://en.wikipedia.org/wiki/Proportional_navigation)
-
-### 1.2 Line-of-Sight (LOS) Rate Calculation
-
-Given our robot at position `(x_r, y_r)` and enemy at `(x_e, y_e)`:
-
-```
-LOS angle:      lambda = atan2(y_e - y_r, x_e - x_r)
-
-LOS rate:       lambda_dot = (lambda_current - lambda_previous) / dt
-```
-
-For a more robust calculation using relative velocity:
-
-```
-R = [x_e - x_r, y_e - y_r]          # relative position vector
-V_rel = [vx_e - vx_r, vy_e - vy_r]  # relative velocity vector
-
-lambda_dot = (R x V_rel) / |R|^2
-           = (R_x * V_rel_y - R_y * V_rel_x) / (R_x^2 + R_y^2)
-```
-
-Where `R x V_rel` is the 2D cross product (scalar). This avoids atan2 discontinuities and numerical differentiation noise.
-
-### 1.3 The PN Steering Command (2D)
-
-**Pure Proportional Navigation (PPN):**
-
-```
-a_n = N * lambda_dot * V_c
-```
-
-Where:
-- `a_n` = commanded lateral acceleration (perpendicular to our velocity vector)
-- `N` = navigation constant (dimensionless), typically **3 to 5**
-- `lambda_dot` = LOS rotation rate (rad/s)
-- `V_c` = closing velocity = -dR/dt (rate of range decrease)
-
-**Closing velocity calculation:**
-
-```
-V_c = -(R . V_rel) / |R|
-    = -(R_x * V_rel_x + R_y * V_rel_y) / sqrt(R_x^2 + R_y^2)
-```
-
-Where `R . V_rel` is the dot product. Positive V_c means objects are approaching.
-
-### 1.4 Navigation Constant N Selection
-
-| N Value | Behavior | Use Case |
-|---------|----------|----------|
-| 2       | Minimum for collision course, tail-chase only | Not practical |
-| 3       | Classical PN, optimal for non-maneuvering targets | **Default starting point** |
-| 4       | More aggressive correction, handles moderate maneuvers | **Recommended for combat** |
-| 5       | Very aggressive, handles high-g maneuvers | Risk of oscillation |
-| >5      | Diminishing returns, amplifies noise | Avoid |
-
-**For combat robotics: Start with N=4.** Combat robots maneuver unpredictably. N=3 is optimal against constant-velocity targets but sluggish against maneuvering ones. N=5 risks oscillation with noisy CV measurements.
-
-Source: [JHU APL - Basic Principles of Homing Guidance](https://secwww.jhuapl.edu/techdigest/content/techdigest/pdf/V29-N01/29-01-Palumbo_Principles_Rev2018.pdf)
-
-### 1.5 Augmented Proportional Navigation (APN)
-
-APN adds a term to compensate for estimated target acceleration:
-
-```
-a_n = N * lambda_dot * V_c + (N/2) * a_t
-```
-
-Where `a_t` is the estimated target lateral acceleration (perpendicular to LOS). This is the **optimal guidance law against a maneuvering target** and can be derived from optimal control theory.
-
-For our application, `a_t` can be estimated from the Kalman filter's velocity change between frames.
-
-### 1.6 Adapting PN to Differential Drive (Non-Holonomic)
-
-Missiles steer with lateral acceleration. A differential-drive robot steers with angular velocity (omega). The adaptation:
-
-**Step 1: Compute desired lateral acceleration from PN:**
-```
-a_n = N * lambda_dot * V_c
-```
-
-**Step 2: Convert acceleration to angular velocity command:**
-```
-omega = a_n / V_robot
-```
-
-Where `V_robot` is our robot's current forward speed. This gives the turn rate needed.
-
-**Step 3: Convert to differential drive wheel speeds:**
-```
-V_left  = V_robot - omega * (track_width / 2)
-V_right = V_robot + omega * (track_width / 2)
-```
-
-**Step 4: Clamp to physical limits:**
-```python
-V_left  = clamp(V_left, -V_max, V_max)
-V_right = clamp(V_right, -V_max, V_max)
-```
-
-### 1.7 PN Pseudocode for Combat Robot
+Put a bright, distinctive color marker on top of our robot (e.g., neon green tape, bright orange lid). Then detect ourselves via HSV color segmentation *in addition to* ArUco. When ArUco fails due to motion blur, the color mask still works because color detection is blur-resistant.
 
 ```python
-def proportional_navigation(our_pos, our_vel, enemy_pos, enemy_vel,
-                             N=4.0, track_width=0.15):
+import cv2
+import numpy as np
+
+class ColorSelfTracker:
+    """Detect our robot by its distinctive color when ArUco fails.
+    
+    Put bright green tape/lid on top of our robot. HSV detection
+    works even with motion blur because color survives blur.
     """
-    Compute differential drive commands using Proportional Navigation.
     
-    Args:
-        our_pos: (x, y) in meters
-        our_vel: (vx, vy) in m/s
-        enemy_pos: (x, y) in meters
-        enemy_vel: (vx, vy) in m/s (from Kalman filter)
-        N: navigation constant (3-5)
-        track_width: wheel-to-wheel distance in meters
+    def __init__(self):
+        # Neon green in HSV (tune these with a trackbar tool)
+        self.hsv_lower = np.array([35, 100, 100])
+        self.hsv_upper = np.array([85, 255, 255])
+        # Morphology kernels
+        self._kernel_open = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
+        self._kernel_close = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (15, 15))
+        self._last_mask = None
     
-    Returns:
-        (V_left, V_right) wheel speed commands
-    """
-    # Relative position and velocity
-    Rx = enemy_pos[0] - our_pos[0]
-    Ry = enemy_pos[1] - our_pos[1]
-    Vx = enemy_vel[0] - our_vel[0]
-    Vy = enemy_vel[1] - our_vel[1]
-    
-    R_sq = Rx**2 + Ry**2
-    R_mag = math.sqrt(R_sq)
-    
-    if R_mag < 0.05:  # 5cm -- we've hit them
-        return (0.0, 0.0)
-    
-    # LOS rotation rate (2D cross product / range squared)
-    lambda_dot = (Rx * Vy - Ry * Vx) / R_sq
-    
-    # Closing velocity (negative dot product / range)
-    V_closing = -(Rx * Vx + Ry * Vy) / R_mag
-    
-    if V_closing < 0.01:  # Target moving away faster than we approach
-        # Fall back to pure pursuit (steer directly toward target)
-        lambda_dot = compute_heading_error(our_pos, our_vel, enemy_pos)
-        omega = 2.0 * lambda_dot  # proportional control fallback
-    else:
-        # PN lateral acceleration
-        a_n = N * lambda_dot * V_closing
+    def detect(self, frame):
+        """Returns (center_xy, bounding_radius) or (None, None).
         
-        # Convert to angular velocity
-        V_robot = math.sqrt(our_vel[0]**2 + our_vel[1]**2)
-        V_robot = max(V_robot, 0.1)  # avoid divide by zero
-        omega = a_n / V_robot
+        Works even under motion blur because color survives blur.
+        """
+        hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
+        mask = cv2.inRange(hsv, self.hsv_lower, self.hsv_upper)
+        
+        # Morphology cleanup
+        mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, self._kernel_open)
+        mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, self._kernel_close)
+        self._last_mask = mask
+        
+        contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        if not contours:
+            return None, None
+        
+        # Largest green blob = our robot
+        biggest = max(contours, key=cv2.contourArea)
+        area = cv2.contourArea(biggest)
+        if area < 200:  # too small, noise
+            return None, None
+        
+        ((cx, cy), radius) = cv2.minEnclosingCircle(biggest)
+        return (cx, cy), radius
     
-    # Convert to differential drive
-    V_forward = V_MAX  # full speed ahead during intercept
-    V_left  = V_forward - omega * (track_width / 2)
-    V_right = V_forward + omega * (track_width / 2)
-    
-    # Clamp to motor limits
-    V_left  = max(-V_MAX, min(V_MAX, V_left))
-    V_right = max(-V_MAX, min(V_MAX, V_right))
-    
-    return (V_left, V_right)
+    def get_exclusion_mask(self, frame_shape, center, radius, expand=1.5):
+        """Create a mask that blacks out our robot's region.
+        
+        Use this to exclude our robot from enemy detection.
+        expand: multiply radius by this factor for safety margin.
+        """
+        mask = np.ones(frame_shape[:2], dtype=np.uint8) * 255
+        if center is not None:
+            cv2.circle(mask, (int(center[0]), int(center[1])),
+                      int(radius * expand), 0, -1)
+        return mask
 ```
 
-Source: [ResearchGate - Proportional navigation guidance for robotic interception](https://www.researchgate.net/publication/230444899_Proportional_navigation_guidance_for_robotic_interception_of_moving_objects)
-
----
-
-## 2. Intercept Point Calculation
-
-### 2.1 Problem Statement
-
-Given:
-- Our robot at position **P_r** with speed **s** (scalar, we control direction)
-- Enemy at position **P_e** with velocity vector **V_e** (from Kalman filter)
-
-Find: The point **I** where our robot can arrive at the same time as the enemy, assuming the enemy maintains constant velocity.
-
-### 2.2 Quadratic Equation Derivation
-
-Let **o** = P_e - P_r (offset vector from us to enemy).
-
-At intercept time `t`:
-- Enemy is at: P_e + V_e * t
-- We travel distance: s * t
-
-Setting distances equal (we can reach the intercept point):
-
-```
-|o + V_e * t| = s * t
-```
-
-Squaring both sides:
-
-```
-(o_x + V_e_x * t)^2 + (o_y + V_e_y * t)^2 = s^2 * t^2
-```
-
-Expanding and collecting terms in t:
-
-```
-(V_e_x^2 + V_e_y^2 - s^2) * t^2 + 2*(o_x*V_e_x + o_y*V_e_y) * t + (o_x^2 + o_y^2) = 0
-```
-
-This is a standard quadratic `a*t^2 + b*t + c = 0` with:
-
-```
-a = |V_e|^2 - s^2          = (enemy speed)^2 - (our speed)^2
-b = 2 * (o . V_e)          = 2 * dot(offset, enemy_velocity)
-c = |o|^2                  = (distance to enemy)^2
-```
-
-Source: [Calculating an intercept course](http://jaran.de/goodbits/2011/07/17/calculating-an-intercept-course-to-a-target-with-constant-direction-and-velocity-in-a-2-dimensional-plane/), [AI Projectile Intercept Formula](https://medium.com/andys-coding-blog/ai-projectile-intercept-formula-for-gaming-without-trigonometry-37b70ef5718b)
-
-### 2.3 Solution Cases
-
-**Discriminant: D = b^2 - 4*a*c**
-
-| Case | Condition | Meaning |
-|------|-----------|---------|
-| D < 0 | No real roots | **Enemy is faster and moving away -- intercept impossible** |
-| D = 0 | One root | Tangential intercept (barely reachable) |
-| D > 0 | Two roots | Two possible intercept times |
-| a = 0 | Linear case | Equal speeds: t = -c / b (if b != 0) |
-| a = 0, b = 0 | Degenerate | Already at same position or parallel equal-speed |
-
-**Selection rule**: Take the **smallest positive** root. Negative roots represent intercepts "in the past."
-
-### 2.4 Complete Implementation
+**Integration with existing enemy_tracker.py:**
 
 ```python
-def compute_intercept_point(our_pos, our_speed, enemy_pos, enemy_vel):
-    """
-    Compute the intercept point assuming enemy maintains constant velocity.
+class EnemyDetector:
+    def __init__(self, ...):
+        # ... existing init ...
+        self._color_self = ColorSelfTracker()
     
-    Returns:
-        (intercept_point, intercept_time) or (None, None) if impossible
-    """
-    # Offset from us to enemy
-    ox = enemy_pos[0] - our_pos[0]
-    oy = enemy_pos[1] - our_pos[1]
-    
-    # Quadratic coefficients
-    evx, evy = enemy_vel
-    a = evx**2 + evy**2 - our_speed**2
-    b = 2.0 * (ox * evx + oy * evy)
-    c = ox**2 + oy**2
-    
-    t = None
-    
-    if abs(a) < 1e-10:
-        # Linear case: equal speeds
-        if abs(b) < 1e-10:
-            return (None, None)  # degenerate
-        t = -c / b
-    else:
-        # Quadratic case
-        discriminant = b**2 - 4*a*c
+    def detect(self, frame, our_robot_corners=None):
+        # Try ArUco corners first, fall back to color detection
+        exclusion_center = None
+        exclusion_radius = 150  # default
         
-        if discriminant < 0:
-            return (None, None)  # no intercept possible
+        if our_robot_corners is not None:
+            exclusion_center = our_robot_corners.mean(axis=0).astype(int)
+        else:
+            # ArUco failed (motion blur) -- use color fallback
+            color_center, color_radius = self._color_self.detect(frame)
+            if color_center is not None:
+                exclusion_center = np.array([int(color_center[0]), int(color_center[1])])
+                exclusion_radius = int(color_radius * 1.5)
         
-        sqrt_d = math.sqrt(discriminant)
-        t1 = (-b + sqrt_d) / (2 * a)
-        t2 = (-b - sqrt_d) / (2 * a)
-        
-        # Pick smallest positive time
-        candidates = [t for t in [t1, t2] if t > 0.001]
-        if not candidates:
-            return (None, None)
-        t = min(candidates)
-    
-    if t is None or t < 0:
-        return (None, None)
-    
-    # Intercept point is where the enemy will be at time t
-    intercept_x = enemy_pos[0] + evx * t
-    intercept_y = enemy_pos[1] + evy * t
-    
-    return ((intercept_x, intercept_y), t)
+        # ... rest of detection uses exclusion_center/exclusion_radius ...
 ```
 
-### 2.5 Handling "No Intercept" Cases
+**Why this works:** Color survives motion blur. A neon green lid on your robot will still show as a green blob even at high speed. ArUco markers have sharp edges that blur destroys, but a solid color patch is robust to blur.
 
-When the quadratic has no solution (enemy is faster and diverging):
+### Solution B: SORT-Style Multi-Object Tracking with Assignment
 
-1. **Fall back to pure pursuit** -- steer directly toward current enemy position
-2. **Cut-off strategy** -- steer toward the point on the arena boundary the enemy is heading toward (arena is only 8x8ft, walls force direction changes)
-3. **Predictive wall bounce** -- if enemy is heading toward a wall, predict the bounce point
+Instead of detecting "the enemy" directly, detect ALL moving objects and use track assignment to figure out which is which. The SORT algorithm (Simple Online Realtime Tracking) does exactly this:
 
-### 2.6 Iterative Refinement
+1. Detect all foreground blobs (both robots)
+2. Kalman filter predicts where each tracked object should be
+3. Hungarian algorithm matches detections to tracks by distance
+4. Track IDs persist across frames
 
-The closed-form solution assumes constant enemy velocity. For a maneuvering target:
+This solves the merge problem because even when blobs merge, the Kalman prediction keeps the two tracks separate, and when they separate again the assignment recovers.
+
+Reference implementation: [abewley/sort](https://github.com/abewley/sort) -- runs at 260 Hz, uses `filterpy.kalman.KalmanFilter` and `scipy.optimize.linear_sum_assignment`.
+
+**Lightweight SORT adapted for our 2-robot arena (centroid-based, not bbox-based):**
 
 ```python
-def iterative_intercept(our_pos, our_speed, enemy_pos, enemy_vel, 
-                         enemy_accel, max_iterations=3):
-    """
-    Iteratively refine intercept point accounting for enemy acceleration.
-    """
-    intercept, t = compute_intercept_point(our_pos, our_speed, 
-                                            enemy_pos, enemy_vel)
-    if intercept is None:
-        return None, None
+import numpy as np
+from scipy.optimize import linear_sum_assignment
+
+class CentroidKalmanTracker:
+    """Kalman tracker for a single object using centroid position."""
+    _id_counter = 0
     
-    for _ in range(max_iterations):
-        # Predict enemy position at time t with acceleration
-        pred_x = enemy_pos[0] + enemy_vel[0]*t + 0.5*enemy_accel[0]*t**2
-        pred_y = enemy_pos[1] + enemy_vel[1]*t + 0.5*enemy_accel[1]*t**2
-        pred_vx = enemy_vel[0] + enemy_accel[0]*t
-        pred_vy = enemy_vel[1] + enemy_accel[1]*t
+    def __init__(self, centroid, dt=1/60):
+        self.id = CentroidKalmanTracker._id_counter
+        CentroidKalmanTracker._id_counter += 1
         
-        # Recompute with updated prediction
-        new_intercept, new_t = compute_intercept_point(
-            our_pos, our_speed, (pred_x, pred_y), (pred_vx, pred_vy))
+        # State: [x, y, vx, vy]
+        self.x = np.array([centroid[0], centroid[1], 0.0, 0.0], dtype=np.float64)
+        self.P = np.diag([10.0, 10.0, 100.0, 100.0])
         
-        if new_intercept is None:
-            break
+        self.F = np.array([
+            [1, 0, dt, 0],
+            [0, 1, 0, dt],
+            [0, 0, 1, 0],
+            [0, 0, 0, 1],
+        ], dtype=np.float64)
+        self.H = np.array([[1, 0, 0, 0], [0, 1, 0, 0]], dtype=np.float64)
         
-        if abs(new_t - t) < 0.01:  # converged (10ms)
-            break
-        
-        intercept, t = new_intercept, new_t
-    
-    return intercept, t
-```
-
----
-
-## 3. Kalman Filter for Enemy Tracking
-
-### 3.1 State Vector (Constant Velocity Model)
-
-The enemy robot has no markers, so we track it via CV detection (position only, no direct velocity measurement). The Kalman filter estimates velocity from position observations.
-
-```
-State vector x = [x, y, vx, vy]^T
-
-x, y   = enemy position in arena coordinates (meters)
-vx, vy = enemy velocity (m/s), estimated by the filter
-```
-
-Source: [Cookie Robotics - Kalman Filter for 2D Motion](https://cookierobotics.com/071/)
-
-### 3.2 State Transition Matrix F
-
-Constant velocity model with time step `dt`:
-
-```
-F = | 1   0   dt  0  |
-    | 0   1   0   dt |
-    | 0   0   1   0  |
-    | 0   0   0   1  |
-```
-
-This encodes: `x_new = x + vx*dt`, `vx_new = vx` (velocity persists).
-
-### 3.3 Measurement Matrix H
-
-We only measure position (from CV detection), not velocity:
-
-```
-H = | 1  0  0  0 |
-    | 0  1  0  0 |
-```
-
-Maps state to measurement: `z = H * x = [x, y]^T`
-
-### 3.4 Process Noise Covariance Q
-
-The process noise models **unmodeled acceleration** -- the enemy changing direction/speed. This is the critical tuning parameter for combat.
-
-Using the "discrete white noise acceleration" model:
-
-```
-Q = | dt^4/4    0      dt^3/2   0     |
-    | 0         dt^4/4  0       dt^3/2 |         * sigma_a^2
-    | dt^3/2    0       dt^2    0     |
-    | 0         dt^3/2  0       dt^2  |
-```
-
-Where `sigma_a` is the **assumed maximum acceleration** of the enemy (m/s^2).
-
-**Tuning sigma_a for combat robots:**
-
-| sigma_a | Behavior | Scenario |
-|---------|----------|----------|
-| 1-2 m/s^2 | Smooth tracking, slow to adapt | Predictable movement |
-| 3-5 m/s^2 | Balanced -- good for most combat | **Recommended starting point** |
-| 8-15 m/s^2 | Very responsive, noisy velocity estimate | Erratic spinner/flipper |
-| 20+ m/s^2 | Essentially trusts measurement over prediction | Emergency fallback |
-
-**Start with sigma_a = 5.0 m/s^2** for beetleweight combat. This accommodates sudden direction changes (beetles can do ~2-3g turns at full speed) while maintaining useful velocity estimates.
-
-Source: [IEEE - MSE Design of NCV Kalman Filters for Tracking Maneuvering Targets](https://ieeexplore.ieee.org/document/10032801/)
-
-### 3.5 Measurement Noise Covariance R
-
-The measurement noise reflects **how noisy our CV detection is** -- centroid jitter from contour detection, background subtraction artifacts, etc.
-
-```
-R = | sigma_x^2    0       |
-    | 0            sigma_y^2 |
-```
-
-For overhead camera CV detection in an 8x8ft arena at 720p:
-- Arena is ~244cm across ~900 pixels = ~2.7mm/pixel
-- Contour centroid accuracy: typically +/- 3-5 pixels = ~8-14mm
-- **sigma_x = sigma_y = 0.01 m (1cm)** is a reasonable starting point
-
-Measure empirically: place a stationary object, detect it for 100 frames, compute standard deviation of centroid positions.
-
-### 3.6 Prediction and Update Equations
-
-**Prediction step** (every frame, even without detection):
-
-```
-x_predicted = F * x_estimated
-P_predicted = F * P_estimated * F^T + Q
-```
-
-**Update step** (only when detection is available):
-
-```
-y = z - H * x_predicted                          # innovation (measurement residual)
-S = H * P_predicted * H^T + R                     # innovation covariance
-K = P_predicted * H^T * S^(-1)                    # Kalman gain
-x_estimated = x_predicted + K * y                  # updated state
-P_estimated = (I - K * H) * P_predicted            # updated covariance
-```
-
-**Joseph form** (numerically more stable for the covariance update):
-```
-P_estimated = (I - K*H) * P_predicted * (I - K*H)^T + K * R * K^T
-```
-
-### 3.7 Handling Detection Dropouts
-
-Combat robots frequently disappear from detection (occlusion, blur, reflection):
-
-```python
-class EnemyTracker:
-    def __init__(self, dt=1/60, sigma_a=5.0, sigma_meas=0.01):
-        self.dt = dt
-        self.x = np.zeros(4)        # [x, y, vx, vy]
-        self.P = np.eye(4) * 100    # high initial uncertainty
-        self.F = np.array([[1,0,dt,0],[0,1,0,dt],[0,0,1,0],[0,0,0,1]])
-        self.H = np.array([[1,0,0,0],[0,1,0,0]])
-        
-        # Process noise (discrete white noise acceleration)
-        q = sigma_a**2
+        sigma_a = 500.0  # px/s^2 -- combat robots accelerate hard
         dt2, dt3, dt4 = dt**2, dt**3, dt**4
         self.Q = np.array([
-            [dt4/4, 0,     dt3/2, 0    ],
-            [0,     dt4/4, 0,     dt3/2],
-            [dt3/2, 0,     dt2,   0    ],
-            [0,     dt3/2, 0,     dt2  ]
-        ]) * q
+            [dt4/4, 0, dt3/2, 0],
+            [0, dt4/4, 0, dt3/2],
+            [dt3/2, 0, dt2, 0],
+            [0, dt3/2, 0, dt2],
+        ]) * sigma_a**2
         
-        self.R = np.eye(2) * sigma_meas**2
-        self.frames_without_detection = 0
-        self.MAX_COAST = 15  # ~250ms at 60fps
+        self.R = np.eye(2) * 5.0**2  # measurement noise: 5px
+        
+        self.hits = 1
+        self.age = 0
+        self.time_since_update = 0
     
     def predict(self):
-        """Always call predict each frame."""
         self.x = self.F @ self.x
         self.P = self.F @ self.P @ self.F.T + self.Q
+        self.age += 1
+        self.time_since_update += 1
+        return self.x[:2]
     
-    def update(self, measurement):
-        """Call when detection is available. measurement = [x, y]."""
-        if measurement is not None:
-            z = np.array(measurement)
-            y = z - self.H @ self.x
-            S = self.H @ self.P @ self.H.T + self.R
-            K = self.P @ self.H.T @ np.linalg.inv(S)
-            self.x = self.x + K @ y
-            self.P = (np.eye(4) - K @ self.H) @ self.P
-            self.frames_without_detection = 0
-        else:
-            self.frames_without_detection += 1
-    
-    def is_tracking_valid(self):
-        """Is the track still trustworthy?"""
-        return self.frames_without_detection < self.MAX_COAST
+    def update(self, centroid):
+        z = np.array(centroid, dtype=np.float64)
+        y = z - self.H @ self.x
+        S = self.H @ self.P @ self.H.T + self.R
+        K = self.P @ self.H.T @ np.linalg.inv(S)
+        self.x = self.x + K @ y
+        self.P = (np.eye(4) - K @ self.H) @ self.P
+        self.hits += 1
+        self.time_since_update = 0
     
     @property
     def position(self):
@@ -515,576 +184,879 @@ class EnemyTracker:
     @property
     def velocity(self):
         return self.x[2:]
+
+
+class MultiObjectTracker:
+    """SORT-style tracker for the 2-robot arena.
     
-    @property
-    def speed(self):
-        return np.linalg.norm(self.x[2:])
-    
-    @property
-    def position_uncertainty(self):
-        """Returns 1-sigma position uncertainty in meters."""
-        return np.sqrt(self.P[0,0] + self.P[1,1])
-```
-
-### 3.8 Adaptive Process Noise
-
-For adversarial targets that switch between cruising and maneuvering:
-
-```python
-def adaptive_process_noise(self, innovation):
+    Tracks all foreground blobs, assigns persistent IDs.
+    Use track assignment to determine which is our robot vs enemy.
     """
-    Increase process noise when the filter is surprised by measurements.
-    Based on innovation-based adaptive estimation (IAE).
+    
+    def __init__(self, max_lost=30, dt=1/60):
+        self.trackers = []
+        self.max_lost = max_lost  # frames before dropping a track
+        self.dt = dt
+        # Gate: max distance (px) for a detection to match a track
+        self.gate_distance = 120.0
+    
+    def update(self, detections):
+        """Update with list of centroid detections [(x,y), ...].
+        
+        Returns list of (track_id, position, velocity) for active tracks.
+        """
+        # 1. Predict all existing tracks
+        predictions = []
+        for trk in self.trackers:
+            predictions.append(trk.predict())
+        
+        # 2. Build cost matrix (Euclidean distance)
+        if len(predictions) > 0 and len(detections) > 0:
+            cost = np.zeros((len(detections), len(predictions)))
+            for d, det in enumerate(detections):
+                for t, pred in enumerate(predictions):
+                    cost[d, t] = np.linalg.norm(np.array(det) - pred)
+            
+            # 3. Hungarian assignment
+            row_idx, col_idx = linear_sum_assignment(cost)
+            
+            matched_dets = set()
+            matched_trks = set()
+            
+            for d, t in zip(row_idx, col_idx):
+                if cost[d, t] < self.gate_distance:
+                    self.trackers[t].update(detections[d])
+                    matched_dets.add(d)
+                    matched_trks.add(t)
+            
+            # 4. Create new tracks for unmatched detections
+            for d, det in enumerate(detections):
+                if d not in matched_dets:
+                    self.trackers.append(
+                        CentroidKalmanTracker(det, dt=self.dt)
+                    )
+        elif len(detections) > 0:
+            # No existing tracks -- create all new
+            for det in detections:
+                self.trackers.append(
+                    CentroidKalmanTracker(det, dt=self.dt)
+                )
+        
+        # 5. Remove dead tracks
+        self.trackers = [t for t in self.trackers
+                        if t.time_since_update <= self.max_lost]
+        
+        # 6. Return active tracks
+        results = []
+        for trk in self.trackers:
+            if trk.hits >= 3 or trk.time_since_update == 0:
+                results.append((trk.id, trk.position.copy(), trk.velocity.copy()))
+        
+        return results
+    
+    def identify_robots(self, tracks, our_aruco_pos=None, our_color_pos=None):
+        """Given tracks and our known position, identify which track is us vs enemy.
+        
+        Returns (our_track_id, enemy_track_id) or (None, None).
+        """
+        if not tracks:
+            return None, None
+        
+        our_pos = our_aruco_pos if our_aruco_pos is not None else our_color_pos
+        if our_pos is None:
+            return None, None
+        
+        our_pos = np.array(our_pos)
+        
+        # Find track closest to our known position
+        best_dist = float('inf')
+        our_id = None
+        for tid, pos, vel in tracks:
+            dist = np.linalg.norm(pos - our_pos)
+            if dist < best_dist:
+                best_dist = dist
+                our_id = tid
+        
+        # Enemy = the other track
+        enemy_id = None
+        for tid, pos, vel in tracks:
+            if tid != our_id:
+                enemy_id = tid
+                break
+        
+        return our_id, enemy_id
+```
+
+### Solution C: Blob Merge Handling with Predicted Separation
+
+When our robot gets close to the enemy, the two blobs merge into one. Instead of trying to separate them, accept the merge and use predictions:
+
+```python
+def handle_merged_blob(merged_centroid, our_predicted_pos, enemy_predicted_pos):
+    """When blobs merge, estimate individual positions from the merged blob.
+    
+    The merged centroid is roughly the area-weighted average of the two robots.
+    Use Kalman predictions to estimate where each robot is within the merged blob.
     """
-    # Normalized innovation squared (NIS)
-    S = self.H @ self.P @ self.H.T + self.R
-    nis = innovation.T @ np.linalg.inv(S) @ innovation
+    separation = np.linalg.norm(our_predicted_pos - enemy_predicted_pos)
     
-    # If NIS is much larger than expected (chi-squared, 2 DOF, 95% = 5.99)
-    if nis > 6.0:
-        # Enemy is maneuvering -- boost process noise temporarily
-        self.Q *= 4.0  # quadruple Q
-    elif nis < 1.0:
-        # Tracking well -- can reduce process noise toward baseline
-        self.Q = self.Q * 0.9 + self.Q_baseline * 0.1
+    if separation < 50:  # pixels -- robots are very close
+        # Trust Kalman predictions, don't update with merged measurement
+        # Just coast both tracks on prediction alone
+        return None, None  # signal: don't update either track
+    
+    # If somewhat separated, assign merged centroid to nearest track
+    d_our = np.linalg.norm(merged_centroid - our_predicted_pos)
+    d_enemy = np.linalg.norm(merged_centroid - enemy_predicted_pos)
+    
+    if d_our < d_enemy:
+        return merged_centroid, None  # update our track, coast enemy
+    else:
+        return None, merged_centroid  # coast ours, update enemy
 ```
 
-Source: [MDPI - Self-Tuning Process Noise in Variational Bayesian Adaptive Kalman Filter](https://www.mdpi.com/2079-9292/12/18/3887)
+### Recommendation
+
+**Use Solution A (color) + Solution B (SORT) together.** Put neon green tape on your robot. The color tracker gives you self-position even during motion blur. SORT gives you persistent track IDs that survive brief occlusions and merges. The combination solves all three failure modes:
+
+1. **Motion blur kills ArUco** -> color fallback masks our robot
+2. **Blobs merge** -> SORT's Kalman predictions coast through the merge
+3. **Detection teleports** -> SORT's Hungarian assignment + gating rejects impossible jumps
 
 ---
 
-## 4. Pure Pursuit vs Lead Pursuit
+## 2. Smooth Pursuit Curves for Tank Drive
 
-### 4.1 Pure Pursuit
+### Problem Recap
+Current behavior: turn in place until facing target, drive straight, repeat. This creates a jerky stop-start pattern because the turn-in-place threshold is 90 degrees and there's no simultaneous turn+drive for smaller angles.
 
-**Definition**: Steer directly toward the target's **current position**. The velocity vector always points at the target.
+### Solution: Pure Pursuit with Continuous Arc Driving
 
-**Equation:**
-```
-desired_heading = atan2(enemy_y - our_y, enemy_x - our_x)
-heading_error = normalize_angle(desired_heading - our_heading)
-omega = Kp * heading_error
-```
+Pure pursuit computes a circular arc from your current position to a lookahead point, then converts that arc to differential wheel speeds. There is NO stopping. The robot always drives forward while steering.
 
-**Curvature formulation** (from CMU's Coulter 1992):
-```
-kappa = 2 * sin(alpha) / L_d
-```
-Where:
-- `kappa` = curvature (1/turning_radius)
-- `alpha` = angle from robot heading to target point
-- `L_d` = lookahead distance (distance to target)
+**References:**
+- [CMU original paper (Coulter 1992)](https://www.ri.cmu.edu/pub_files/pub3/coulter_r_craig_1992_1/coulter_r_craig_1992_1.pdf)
+- [FRC Team 1712 Python implementation](https://github.com/arimb/PurePursuit)
+- [PythonRobotics pure_pursuit.py](https://github.com/AtsushiSakai/PythonRobotics/blob/master/PathTracking/pure_pursuit/pure_pursuit.py)
+- [Purdue SIGBots Wiki](https://wiki.purduesigbots.com/software/control-algorithms/basic-pure-pursuit)
 
-For differential drive:
-```
-omega = kappa * V_robot = 2 * V_robot * sin(alpha) / L_d
-```
-
-Source: [CMU - Implementation of Pure Pursuit Path Tracking (Coulter 1992)](https://www.ri.cmu.edu/pub_files/pub3/coulter_r_craig_1992_1/coulter_r_craig_1992_1.pdf), [Algorithms for Automated Driving - Pure Pursuit](https://thomasfermi.github.io/Algorithms-for-Automated-Driving/Control/PurePursuit.html)
-
-### 4.2 Lead Pursuit
-
-**Definition**: Steer toward a point **ahead of the target** along its velocity vector. The aim point "leads" the target.
-
-**Equation:**
-```
-lead_point = enemy_pos + enemy_vel * lead_time
-desired_heading = atan2(lead_point_y - our_y, lead_point_x - our_x)
-heading_error = normalize_angle(desired_heading - our_heading)
-omega = Kp * heading_error
-```
-
-**Lead time selection**: Use the intercept time from Section 2, or a fixed time horizon:
-```
-lead_time = distance_to_enemy / our_speed
-```
-
-This is essentially a simplified version of intercept point calculation.
-
-### 4.3 Comparison
-
-| Property | Pure Pursuit | Lead Pursuit | Proportional Navigation |
-|----------|-------------|--------------|------------------------|
-| **Complexity** | Trivial | Low | Moderate |
-| **Requires enemy velocity?** | No | Yes | Yes |
-| **Path shape** | Curved (tail-chase spiral) | Straighter intercept | Near-optimal intercept |
-| **Against moving target** | Always behind | Close to intercept | Provably optimal |
-| **Against stationary** | Converges directly | Same as pure | Degenerates to pure |
-| **Noise sensitivity** | Low | Medium | Higher (uses V_c, lambda_dot) |
-| **Best for** | Close range, slow targets | Medium range | Long range, fast targets |
-
-### 4.4 Lookahead Distance Tuning
-
-For the pure pursuit curvature equation, the lookahead distance `L_d` controls stability:
+**The core math for tank/differential drive:**
 
 ```
-L_d = K_dd * V_robot
+Given:
+  - Robot at (rx, ry) facing heading theta
+  - Lookahead point at (gx, gy)
+  - Lookahead distance L_d = distance to goal point
+  - Robot wheelbase (track width) W
+
+1. Compute angle to goal relative to robot heading:
+   alpha = atan2(gy - ry, gx - rx) - theta
+
+2. Compute signed curvature of the arc:
+   kappa = 2 * sin(alpha) / L_d
+
+3. Compute angular velocity from curvature:
+   omega = v * kappa    (where v = forward velocity)
+
+4. Compute wheel speeds:
+   v_left  = v - omega * W / 2
+   v_right = v + omega * W / 2
 ```
 
-Where K_dd is a tuning constant.
-
-| L_d | Effect |
-|-----|--------|
-| Small (< 0.3m) | Aggressive tracking, oscillation risk, good accuracy |
-| Medium (0.3-0.6m) | Balanced -- **recommended for 8x8ft arena** |
-| Large (> 0.6m) | Smooth but cuts corners, slow to react |
-
-For our 8x8ft (2.44m) arena, the maximum meaningful L_d is about 1.0m. Recommended: **L_d = 0.3 * V_robot + 0.1** (velocity-scaled with minimum).
-
-Source: [Purdue SIGBots - Basic Pure Pursuit](https://wiki.purduesigbots.com/software/control-algorithms/basic-pure-pursuit)
-
-### 4.5 Recommended Strategy by Situation
-
+From the Purdue SIGBots wiki, for a differential drive robot the turn velocity is:
 ```
-if distance > 1.0m and enemy_speed > threshold and velocity_estimate_confident:
-    use Proportional Navigation (N=4)
-elif distance > 0.5m and have_velocity_estimate:
-    use Lead Pursuit with intercept point
-else:
-    use Pure Pursuit (always works, no velocity needed)
+turnVel = (W * sin(alpha) / L_d) * linearVel
+left_speed  = linearVel - turnVel
+right_speed = linearVel + turnVel
 ```
 
----
-
-## 5. Enemy Detection Without Markers
-
-### 5.1 MOG2 Background Subtraction
-
-OpenCV's MOG2 (Mixture of Gaussians, version 2) is the recommended approach for detecting the enemy robot. It models each pixel as a mixture of Gaussians and classifies pixels that don't fit the background model as foreground.
-
-Source: [OpenCV - BackgroundSubtractorMOG2](https://docs.opencv.org/3.4/d7/d7b/classcv_1_1BackgroundSubtractorMOG2.html)
-
-**Key parameters and recommended values for combat:**
+**Complete implementation for our combat robot:**
 
 ```python
-bg_subtractor = cv2.createBackgroundSubtractorMOG2(
-    history=120,          # ~2 seconds at 60fps (default 500 is too slow for combat)
-    varThreshold=25,      # higher than default 16 to reduce noise
-    detectShadows=False   # shadows waste CPU and create false detections
-)
-```
+import math
+import numpy as np
 
-| Parameter | Default | Combat Setting | Rationale |
-|-----------|---------|----------------|-----------|
-| `history` | 500 | **120** | 2s of frames. Shorter = adapts faster to lighting changes. Longer = more stable background. 500 (8s) means a stopped robot stays "foreground" too long |
-| `varThreshold` | 16 | **25-40** | Higher threshold = less sensitive = fewer false positives. Arena floor texture creates noise at default 16 |
-| `detectShadows` | True | **False** | Shadow detection costs ~20% performance. Overhead lighting in arena creates complex shadows. Better to handle via morphological ops |
-| `backgroundRatio` | 0.9 | **0.7** | Fraction of data to consider background. Lower = more aggressive foreground detection |
-| `nmixtures` | 5 | **3** | Fewer Gaussians per pixel = faster. 3 is sufficient for arena floor |
-| `varInit` | 15 | 15 | Initial variance for new Gaussians |
-| `varMin` | 4 | 4 | Minimum allowed variance |
-| `varMax` | 75 | **50** | Maximum variance. Lower = more sensitive to changes |
 
-Source: [Simon Wenkel - Background Subtraction with OpenCV](https://www.simonwenkel.com/notes/software_libraries/opencv/background-subtraction-using-opencv.html)
-
-### 5.2 Post-Processing Pipeline
-
-Raw MOG2 output is noisy. Apply morphological operations:
-
-```python
-def detect_enemy(frame, bg_subtractor, our_robot_mask):
-    # 1. Background subtraction
-    fg_mask = bg_subtractor.apply(frame, learningRate=0.005)
+class PurePursuitController:
+    """Smooth arc-based pursuit for tank/differential drive robots.
     
-    # 2. Threshold to binary (remove shadow pixels if detectShadows=True)
-    _, fg_mask = cv2.threshold(fg_mask, 200, 255, cv2.THRESH_BINARY)
+    Instead of turn-stop-drive, this computes a continuous arc from
+    the robot's current pose to a lookahead point. The robot always
+    drives forward while steering -- no stopping.
     
-    # 3. Morphological cleanup
-    kernel_open = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
-    kernel_close = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (15, 15))
+    For combat: the "lookahead point" is the intercept point or
+    the enemy's predicted position.
+    """
     
-    fg_mask = cv2.morphologyEx(fg_mask, cv2.MORPH_OPEN, kernel_open)   # remove noise
-    fg_mask = cv2.morphologyEx(fg_mask, cv2.MORPH_CLOSE, kernel_close) # fill gaps
+    def __init__(self, 
+                 wheelbase_cm=15.0,      # track width of our robot
+                 min_lookahead_cm=15.0,   # minimum lookahead distance
+                 max_lookahead_cm=60.0,   # maximum lookahead distance
+                 lookahead_gain=0.5,      # lookahead = gain * speed + min
+                 max_speed=1.0):
+        self.wheelbase = wheelbase_cm
+        self.min_lookahead = min_lookahead_cm
+        self.max_lookahead = max_lookahead_cm
+        self.lookahead_gain = lookahead_gain
+        self.max_speed = max_speed
     
-    # 4. Exclude our own robot
-    fg_mask = cv2.bitwise_and(fg_mask, cv2.bitwise_not(our_robot_mask))
-    
-    # 5. Find and filter contours
-    contours, _ = cv2.findContours(fg_mask, cv2.RETR_EXTERNAL, 
-                                    cv2.CHAIN_APPROX_SIMPLE)
-    
-    enemy_detections = []
-    for contour in contours:
-        area = cv2.contourArea(contour)
-        if not (MIN_AREA < area < MAX_AREA):
-            continue
+    def compute(self, our_pos, our_heading_rad, our_speed, target_pos):
+        """Compute throttle and steering for smooth arc toward target.
         
-        # Aspect ratio filter
-        x, y, w, h = cv2.boundingRect(contour)
-        aspect_ratio = float(w) / h if h > 0 else 0
-        if not (0.3 < aspect_ratio < 3.0):  # robots are roughly square-ish
-            continue
+        Args:
+            our_pos: (x, y) in cm
+            our_heading_rad: robot heading in radians
+            our_speed: current speed in cm/s (for adaptive lookahead)
+            target_pos: (x, y) target point in cm
         
-        # Solidity filter (ratio of contour area to convex hull area)
-        hull = cv2.convexHull(contour)
-        hull_area = cv2.contourArea(hull)
-        solidity = area / hull_area if hull_area > 0 else 0
-        if solidity < 0.4:  # robots are fairly solid shapes
-            continue
-        
-        # Centroid
-        M = cv2.moments(contour)
-        if M["m00"] > 0:
-            cx = M["m10"] / M["m00"]
-            cy = M["m01"] / M["m00"]
-            enemy_detections.append((cx, cy, area))
-    
-    # Return largest detection (most likely the enemy robot)
-    if enemy_detections:
-        enemy_detections.sort(key=lambda d: d[2], reverse=True)
-        return enemy_detections[0][:2]
-    
-    return None
-```
-
-Source: [OpenCV - Contour Properties](https://docs.opencv.org/3.4/d1/d32/tutorial_py_contour_properties.html)
-
-### 5.3 Contour Filtering Parameters
-
-For a beetleweight (3lb / 1.36kg) robot in an 8x8ft arena at 720p:
-
-```
-Arena: 2.44m x 2.44m mapped to ~900 x 900 pixels
-Robot size: ~10cm x 10cm = ~37 x 37 pixels at center
-Scale: ~2.7mm/pixel
-
-MIN_AREA = 400 pixels^2    (~20x20px, smallest reasonable robot blob)
-MAX_AREA = 8000 pixels^2   (~90x90px, largest reasonable + some margin)
-```
-
-| Filter | Threshold | Purpose |
-|--------|-----------|---------|
-| Area min | 400 px^2 | Reject noise specks |
-| Area max | 8000 px^2 | Reject arena features, large shadows |
-| Aspect ratio | 0.3 - 3.0 | Reject long thin reflections/shadows |
-| Solidity | > 0.4 | Reject irregular noise shapes |
-
-### 5.4 Excluding Our Own Robot
-
-Two approaches, use both:
-
-**Approach 1: ArUco-based mask.** Our robot's ArUco detection gives its position and orientation. Expand the marker bounding box to cover the full robot body:
-
-```python
-def create_robot_mask(frame_shape, aruco_corners, expansion=40):
-    """Create a mask around our detected ArUco marker + body."""
-    mask = np.zeros(frame_shape[:2], dtype=np.uint8)
-    if aruco_corners is not None:
-        center = aruco_corners.mean(axis=0).astype(int)
-        # Expanded bounding box covers full robot body
-        cv2.circle(mask, tuple(center), expansion, 255, -1)
-    return mask
-```
-
-**Approach 2: Color/appearance filtering.** If our robot has a distinctive color (e.g., bright tape), HSV filtering can further exclude it.
-
-### 5.5 Frame Differencing as Fast Alternative
-
-For extremely low-latency needs, frame differencing is ~3x faster than MOG2 but less robust:
-
-```python
-def frame_difference_detect(prev_gray, curr_gray, threshold=30):
-    """Simple frame differencing -- fast but noisy."""
-    diff = cv2.absdiff(prev_gray, curr_gray)
-    _, mask = cv2.threshold(diff, threshold, 255, cv2.THRESH_BINARY)
-    
-    # Morphological cleanup
-    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (7, 7))
-    mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel)
-    mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel)
-    
-    return mask
-```
-
-**Frame differencing limitations:**
-- Detects motion, not objects -- a stopped enemy is invisible
-- "Ghosting" artifact: detects where the object was AND where it is
-- Double-blob effect at high speed
-- Aperture problem: uniform-colored robot interior produces hollow detection
-
-**When to use**: As a fast pre-filter to confirm "something is moving" before running MOG2 on the ROI, or as a fallback when MOG2 background model is corrupted.
-
-Source: [LearnOpenCV - Moving Object Detection](https://learnopencv.com/moving-object-detection-with-opencv/), [DEV.to - Motion Detection and Tracking in OpenCV](https://dev.to/jarvissan22/blog-cv2-video-and-motion-detection-and-tracking-j4c)
-
-### 5.6 Handling Shadows and Reflections
-
-Arena-specific challenges:
-- **Polycarbonate walls** create reflections (especially under LED lighting)
-- **Overhead lighting** creates hard shadows that move with robots
-- **Arena floor** (plywood) has texture that MOG2 may classify as foreground
-
-Mitigation strategies:
-
-1. **Increase varThreshold to 25-40**: Reduces sensitivity to subtle shadows
-2. **Morphological opening (5x5)**: Removes small shadow/reflection artifacts
-3. **Area filtering**: Shadows are usually smaller or larger than the expected robot size
-4. **Arena boundary mask**: Mask out wall reflection zones (known regions near arena edges)
-5. **Solidity filter**: Shadows tend to be elongated with low solidity
-6. **CLAHE preprocessing**: Normalizes uneven lighting before background subtraction
-
-```python
-# CLAHE preprocessing to handle uneven arena lighting
-clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
-gray = clahe.apply(cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY))
-```
-
----
-
-## 6. Prediction Under Uncertainty
-
-### 6.1 The Core Problem
-
-Enemy robots are adversarial -- they actively try to evade or attack unpredictably. No motion model is accurate for more than a fraction of a second. The system must handle:
-
-- Sudden 180-degree turns
-- Stops and starts
-- Spinning in place (spinners)
-- Erratic evasive movement
-
-### 6.2 Prediction Horizon
-
-**Rule of thumb**: Only trust predictions up to `T_trust` seconds ahead.
-
-```
-T_trust = min(0.5s, distance_to_enemy / closing_speed)
-```
-
-At 60 FPS with <30ms latency, we recompute every ~16ms. Even a bad 500ms prediction barely matters because we correct 30 times within that window.
-
-**Prediction confidence decays exponentially:**
-```python
-confidence = exp(-t / tau)
-# tau = 0.3s for combat robots (direction changes every ~0.3-0.5s)
-```
-
-### 6.3 Low-Pass Filtering the Intercept Point
-
-Raw intercept point calculations jump around frame-to-frame due to:
-- Measurement noise in enemy position
-- Velocity estimate noise from Kalman filter
-- Discrete-time LOS rate calculation noise
-
-**Exponential Moving Average (EMA) on intercept point:**
-
-```python
-class SmoothedIntercept:
-    def __init__(self, alpha=0.3):
+        Returns:
+            (throttle, steering) in [-1, 1] range
+            throttle: forward/back
+            steering: negative=left, positive=right
         """
-        alpha: smoothing factor (0-1). 
-               Lower = smoother but more lag.
-               Higher = responsive but jittery.
-        """
-        self.alpha = alpha
-        self.smoothed = None
-    
-    def update(self, new_intercept):
-        if new_intercept is None:
-            return self.smoothed
+        dx = target_pos[0] - our_pos[0]
+        dy = target_pos[1] - our_pos[1]
+        distance = math.hypot(dx, dy)
         
-        if self.smoothed is None:
-            self.smoothed = np.array(new_intercept)
+        if distance < 3.0:  # 3cm -- we've arrived
+            return 0.0, 0.0
+        
+        # Adaptive lookahead: faster = look further ahead = smoother arcs
+        lookahead = self.min_lookahead + self.lookahead_gain * abs(our_speed)
+        lookahead = min(lookahead, self.max_lookahead)
+        # Don't look past the target
+        lookahead = min(lookahead, distance)
+        
+        # Angle to target relative to our heading
+        angle_to_target = math.atan2(dy, dx)
+        alpha = _angle_wrap(angle_to_target - our_heading_rad)
+        
+        # --- Core pure pursuit: signed curvature ---
+        # kappa = 2 * sin(alpha) / L_d
+        # This is the curvature of the arc from us to the lookahead point
+        if lookahead > 0.01:
+            curvature = 2.0 * math.sin(alpha) / lookahead
         else:
-            self.smoothed = (self.alpha * np.array(new_intercept) + 
-                           (1 - self.alpha) * self.smoothed)
-        return self.smoothed
+            curvature = 0.0
+        
+        # --- Convert curvature to throttle + steering ---
+        
+        # Throttle: proportional to distance, reduced when turning sharp
+        # Sharp turns (high curvature) need lower speed for stability
+        sharpness = abs(curvature) * self.wheelbase  # dimensionless turn intensity
+        speed_factor = 1.0 / (1.0 + 2.0 * sharpness)  # smooth reduction
+        
+        throttle = self.max_speed * speed_factor
+        # Scale down near target
+        if distance < 20.0:
+            throttle *= distance / 20.0
+        throttle = max(0.1, min(self.max_speed, throttle))
+        
+        # Steering: from curvature
+        # For tank drive: steering = omega / max_omega
+        # omega = v * kappa, but we normalize to [-1, 1]
+        # At max curvature, one wheel stops and the other goes full
+        # That happens when omega * W/2 = v, so kappa_max = 2/W
+        kappa_max = 2.0 / self.wheelbase
+        steering = curvature / kappa_max
+        steering = max(-1.0, min(1.0, steering))
+        
+        return throttle, steering
+    
+    def compute_wheel_speeds(self, our_pos, our_heading_rad, our_speed, target_pos):
+        """Compute individual left/right wheel speeds (alternative output).
+        
+        Returns:
+            (v_left, v_right) normalized to [-1, 1]
+        """
+        dx = target_pos[0] - our_pos[0]
+        dy = target_pos[1] - our_pos[1]
+        distance = math.hypot(dx, dy)
+        
+        if distance < 3.0:
+            return 0.0, 0.0
+        
+        lookahead = self.min_lookahead + self.lookahead_gain * abs(our_speed)
+        lookahead = min(lookahead, self.max_lookahead, distance)
+        
+        angle_to_target = math.atan2(dy, dx)
+        alpha = _angle_wrap(angle_to_target - our_heading_rad)
+        
+        curvature = 2.0 * math.sin(alpha) / max(lookahead, 0.01)
+        
+        # Forward velocity (reduce for sharp turns)
+        v = self.max_speed / (1.0 + 2.0 * abs(curvature) * self.wheelbase)
+        if distance < 20.0:
+            v *= distance / 20.0
+        
+        # Differential wheel speeds
+        omega = v * curvature
+        v_left = v - omega * self.wheelbase / 2.0
+        v_right = v + omega * self.wheelbase / 2.0
+        
+        # Normalize so neither wheel exceeds [-1, 1]
+        max_v = max(abs(v_left), abs(v_right), 0.01)
+        if max_v > 1.0:
+            v_left /= max_v
+            v_right /= max_v
+        
+        return v_left, v_right
+
+
+class CombatPursuitController:
+    """High-level pursuit controller combining intercept + pure pursuit.
+    
+    Replaces the turn-stop-drive pattern with continuous arc driving.
+    Uses proportional navigation at range, pure pursuit when close.
+    """
+    
+    def __init__(self, wheelbase_cm=15.0):
+        self.pursuit = PurePursuitController(wheelbase_cm=wheelbase_cm)
+        self._smoothed_target = None
+        self._alpha = 0.3  # EMA smoothing for target point
+        
+        # PN parameters
+        self.N = 4.0  # navigation constant
+        self.pn_range_threshold = 50.0  # cm -- switch to pure pursuit below this
+    
+    def compute_command(self, our_pos, our_heading, our_vel,
+                        enemy_pos, enemy_vel, our_speed_max=100.0):
+        """Compute smooth pursuit command.
+        
+        At long range: uses proportional navigation to compute an intercept
+        point, then does pure pursuit arc toward that point.
+        
+        At close range: pure pursuit directly toward enemy position.
+        
+        Returns (throttle, steering) in [-1, 1].
+        """
+        our_pos = np.array(our_pos, dtype=np.float64)
+        enemy_pos = np.array(enemy_pos, dtype=np.float64)
+        enemy_vel = np.array(enemy_vel, dtype=np.float64)
+        
+        distance = np.linalg.norm(enemy_pos - our_pos)
+        enemy_speed = np.linalg.norm(enemy_vel)
+        
+        # Choose target point
+        if distance > self.pn_range_threshold and enemy_speed > 5.0:
+            # Long range + enemy moving: intercept point
+            target = self._compute_intercept(our_pos, our_speed_max,
+                                              enemy_pos, enemy_vel)
+        else:
+            # Close range or enemy stationary: go directly to enemy
+            target = enemy_pos
+        
+        # Smooth the target point (prevents jitter)
+        if self._smoothed_target is None:
+            self._smoothed_target = target.copy()
+        else:
+            self._smoothed_target = (self._alpha * target + 
+                                      (1 - self._alpha) * self._smoothed_target)
+        
+        # Our current speed estimate (from velocity if available)
+        our_speed = np.linalg.norm(our_vel) if our_vel is not None else 0.0
+        
+        # Pure pursuit arc toward smoothed target
+        return self.pursuit.compute(
+            our_pos, our_heading, our_speed, self._smoothed_target
+        )
+    
+    def _compute_intercept(self, our_pos, our_speed, enemy_pos, enemy_vel):
+        """Compute intercept point using quadratic solver."""
+        ox = enemy_pos[0] - our_pos[0]
+        oy = enemy_pos[1] - our_pos[1]
+        evx, evy = enemy_vel[0], enemy_vel[1]
+        
+        a = evx**2 + evy**2 - our_speed**2
+        b = 2.0 * (ox * evx + oy * evy)
+        c = ox**2 + oy**2
+        
+        if abs(a) < 1e-10:
+            if abs(b) < 1e-10:
+                return enemy_pos.copy()
+            t = -c / b
+        else:
+            disc = b**2 - 4*a*c
+            if disc < 0:
+                return enemy_pos.copy()
+            sqrt_d = math.sqrt(disc)
+            t1 = (-b + sqrt_d) / (2*a)
+            t2 = (-b - sqrt_d) / (2*a)
+            candidates = [t for t in [t1, t2] if t > 0.001]
+            if not candidates:
+                return enemy_pos.copy()
+            t = min(candidates)
+        
+        if t < 0:
+            return enemy_pos.copy()
+        
+        # Clamp intercept time to prevent chasing far-future predictions
+        t = min(t, 2.0)  # max 2 seconds ahead
+        
+        return np.array([
+            enemy_pos[0] + evx * t,
+            enemy_pos[1] + evy * t,
+        ])
+    
+    def reset(self):
+        self._smoothed_target = None
+
+
+def _angle_wrap(angle):
+    """Wrap angle to [-pi, pi]."""
+    return (angle + math.pi) % (2.0 * math.pi) - math.pi
 ```
 
-**Recommended alpha values:**
+### Key Differences from Current Code
 
-| alpha | Behavior | Use when |
-|-------|----------|----------|
-| 0.1-0.2 | Very smooth, significant lag | Enemy moving predictably |
-| 0.3-0.4 | Balanced | **Default for combat** |
-| 0.5-0.7 | Responsive, some jitter | Enemy maneuvering actively |
-| 0.8-1.0 | Near-raw signal | Close range, need maximum reactivity |
+| Current `PathFollower` | New `PurePursuitController` |
+|---|---|
+| `turn_in_place_threshold = 1.57 rad` (90 deg) -- stops and rotates for large angles | Never stops. Drives a wide arc for large angles, tight arc for small angles |
+| Separate turn phase and drive phase | Single continuous command: always throttle > 0 with steering |
+| Heading PID with slew limiting | Geometric curvature computation -- no PID tuning needed |
+| Fixed throttle (1.0 or proportional near target) | Speed adapts to curvature -- slows for sharp turns automatically |
+| Jittery: constant heading corrections | Smooth: curvature is continuous function of position |
 
-**Adaptive alpha based on distance:**
+### The "Carrot on a Stick" Principle
+
+The lookahead distance is the key parameter:
+- **Short lookahead (15cm):** Robot makes tight corrections, follows path precisely but can oscillate
+- **Long lookahead (60cm):** Robot makes wide gentle arcs, very smooth but cuts corners
+- **Adaptive lookahead:** `L = k * speed + L_min` -- faster = look further = smoother curves
+
+For combat: use short lookahead (aggressive tracking) when close, long lookahead (smooth approach) when far.
+
+### Why Not Just Lower the Turn-in-Place Threshold?
+
+Setting `turn_in_place_threshold_rad` to a smaller value (e.g., 0.3 rad / 17 degrees) would make the robot drive more and stop less, but it still has a discontinuity: below the threshold it drives while steering, above it stops and rotates. Pure pursuit has no discontinuity -- the curvature smoothly increases as the angle increases. At 180 degrees behind, the curvature is maximal (tightest turn) but there is still forward motion.
+
+---
+
+## 3. Kalman Filter Gating for Outlier Rejection
+
+### Problem Recap
+When enemy detection teleports (our robot detected as enemy, or detection jumps to noise), the Kalman filter follows because it trusts measurements. The existing NIS check (line 89-95 in enemy_tracker.py) boosts process noise when NIS > 6.0, but that makes the filter MORE responsive to outliers, not less.
+
+### Solution: Mahalanobis Distance Gating (Reject Before Update)
+
+The fix is simple: compute the Mahalanobis distance (normalized innovation squared, NIS) BEFORE the Kalman update. If it's too large, REJECT the measurement entirely. Don't update. Just coast on prediction.
+
+This is standard practice in aerospace tracking (missile guidance, radar tracking) and is used in SORT, DeepSORT, and the Ultralytics tracker. Reference: [Georgia Tech Robust KF paper](https://acds-lab.gatech.edu/papers/IROS2007_RobustKF.pdf), [Ultralytics gating_distance](https://docs.ultralytics.com/reference/trackers/utils/kalman_filter/).
+
+**Chi-squared thresholds for 2D measurements (position x,y):**
+
+| Confidence | Chi-squared threshold | Meaning |
+|---|---|---|
+| 95% | 5.99 | Rejects 5% of valid measurements (conservative) |
+| 99% | 9.21 | Rejects 1% of valid (good default) |
+| 99.5% | 10.60 | Very permissive -- only rejects extreme outliers |
+
+**Updated EnemyKalmanFilter with proper gating:**
+
 ```python
-alpha = 0.2 + 0.5 * (1.0 - distance / max_arena_diagonal)
-# Close range: alpha ~0.7 (responsive)
-# Far range: alpha ~0.2 (smooth)
+class EnemyKalmanFilter:
+    """4-state Kalman filter with Mahalanobis distance gating.
+    
+    Rejects measurements that are statistically impossible given
+    the current state estimate. Prevents teleporting detections
+    from corrupting the track.
+    """
+    
+    def __init__(self, dt=1/60, sigma_a=5.0, sigma_meas=0.01):
+        # ... same init as before ...
+        
+        # Gating threshold: chi-squared with 2 DOF
+        # 9.21 = 99% confidence -- rejects measurements that are 
+        # >99% unlikely given current state
+        self.gate_threshold = 9.21
+        
+        # Consecutive rejections counter
+        self._consecutive_rejects = 0
+        self._max_consecutive_rejects = 10  # after this, maybe we're lost
+    
+    def update(self, measurement):
+        """Gated update -- rejects outlier measurements."""
+        if measurement is not None:
+            z = np.array(measurement, dtype=np.float64)
+            
+            if not self._initialized:
+                self.x[:2] = z
+                self.x[2:] = 0.0
+                self._initialized = True
+                self.frames_without_detection = 0
+                self._consecutive_rejects = 0
+                return
+            
+            # --- GATING: Reject before update ---
+            innovation = z - self.H @ self.x
+            S = self.H @ self.P @ self.H.T + self.R
+            S_inv = np.linalg.inv(S)
+            
+            # Mahalanobis distance squared (= NIS for Kalman filter)
+            mahal_sq = float(innovation.T @ S_inv @ innovation)
+            
+            if mahal_sq > self.gate_threshold:
+                # Measurement is an outlier -- REJECT, don't update
+                self._consecutive_rejects += 1
+                self.frames_without_detection += 1
+                
+                if self._consecutive_rejects > self._max_consecutive_rejects:
+                    # We've been rejecting too long -- maybe the track is wrong
+                    # Reset and re-acquire on this measurement
+                    self.x[:2] = z
+                    self.x[2:] = 0.0
+                    self.P = np.eye(4) * 100.0
+                    self._consecutive_rejects = 0
+                    self.frames_without_detection = 0
+                
+                return  # Don't update filter
+            
+            # --- ACCEPTED: Normal Kalman update ---
+            K = self.P @ self.H.T @ S_inv
+            self.x = self.x + K @ innovation
+            self.P = (np.eye(4) - K @ self.H) @ self.P
+            
+            self._consecutive_rejects = 0
+            self.frames_without_detection = 0
+            
+            # Adaptive Q (only for accepted measurements)
+            if mahal_sq > 4.0:
+                self.Q = self.Q_baseline * 2.0  # mild boost for maneuvering
+            elif mahal_sq < 1.0:
+                self.Q = self.Q * 0.95 + self.Q_baseline * 0.05
+        else:
+            self.frames_without_detection += 1
+            self._consecutive_rejects = 0  # no measurement isn't a reject
 ```
 
-Source: [mbedded.ninja - EMA Filters](https://blog.mbedded.ninja/programming/signal-processing/digital-filters/exponential-moving-average-ema-filter/), [ResearchGate - Double Exponential Smoothing for Predictive Tracking](https://www.researchgate.net/publication/268217162_Double_Exponential_Smoothing_for_Predictive_Vision_Based_Target_Tracking_of_a_Wheeled_Mobile_Robot)
+### What Changed from Current Code
 
-### 6.4 Re-planning Frequency
-
-At 60 FPS, we have 16.7ms per frame. The full pipeline:
-
-```
-Frame capture:           ~2ms
-ArUco detection (ours):  ~3ms
-Background sub (enemy):  ~4ms
-Kalman filter update:    ~0.1ms
-Intercept calculation:   ~0.05ms
-PN steering command:     ~0.05ms
-Motor command TX:        ~1ms
-------------------------------------
-Total:                   ~10ms (well under 30ms budget)
+The current code (line 82-95 in enemy_tracker.py) does this:
+```python
+# CURRENT (BUG): Update first, THEN check NIS
+y = z - self.H @ self.x
+S = self.H @ self.P @ self.H.T + self.R
+K = self.P @ self.H.T @ np.linalg.inv(S)
+self.x = self.x + K @ y          # <-- already corrupted by outlier!
+self.P = (np.eye(4) - K @ self.H) @ self.P
+nis = y.T @ np.linalg.inv(S) @ y
+if nis > 6.0:
+    self.Q = self.Q_baseline * 4.0  # <-- makes it WORSE next frame
 ```
 
-**Replan every frame (60 Hz)**. The math is cheap (~0.2ms for Kalman + intercept + PN). There is no reason to replan less frequently. The smoothing filter handles jitter.
+The fix:
+1. Compute innovation and NIS **BEFORE** the update
+2. If NIS > threshold, **skip the update entirely** (coast on prediction)
+3. Only increase Q mildly for accepted measurements that show maneuvering
+4. After too many consecutive rejections, reset the track (we're probably lost)
 
-### 6.5 When to Switch Strategies
+### Complementary: Max Jump Distance (Already Exists)
 
-Implement a finite state machine:
+Your existing `MAX_JUMP_PX = 80` in the detector (line 302) is a good first line of defense in pixel space. The Kalman gating adds a second line of defense in world-coordinate space that accounts for velocity and uncertainty.
+
+---
+
+## 4. OAK-D Depth for Object Detection
+
+### Why Depth Solves Your Problems
+
+The OAK-D Pro has stereo depth cameras. An overhead depth camera sees the arena floor at a known depth, and robots are 2-4 inches (~5-10cm) tall. This means:
+
+1. **Floor subtraction via depth:** Any pixel significantly closer to the camera than the floor is a robot. No reference frame needed, immune to lighting changes, works whether objects are moving or stationary.
+2. **Self vs enemy separation:** Even when blobs overlap in 2D, they're at different (x,y) positions in 3D space.
+3. **No ArUco dependency for detection:** Depth-based detection doesn't care about markers at all.
+
+### Implementation: Depth-Based Floor Subtraction
+
+References:
+- [oakmower project](https://alemamm.github.io/oakmower/) -- OAK-D obstacle detection using RANSAC floor plane segmentation
+- [pyRANSAC-3D](https://github.com/leomariga/pyRANSAC-3D) -- `pip install pyransac3d`, fits planes to point clouds
+- [DepthAI StereoDepth docs](https://docs.luxonis.com/projects/api/en/latest/components/nodes/stereo_depth/)
+- [DepthAI Spatial Location Calculator](https://oak-web.readthedocs.io/en/stable/samples/SpatialDetection/spatial_location_calculator/)
 
 ```python
-class PursuitStateMachine:
-    SEARCH   = 0  # No enemy detected
-    ACQUIRE  = 1  # Enemy detected, building velocity estimate
-    INTERCEPT = 2  # Full PN guidance active
-    CLOSE    = 3  # Within striking distance, pure pursuit
-    LOST     = 4  # Had track, lost it, coasting on prediction
+import depthai as dai
+import numpy as np
+import cv2
+
+
+def create_depth_pipeline():
+    """Create DepthAI pipeline for overhead depth-based object detection."""
+    pipeline = dai.Pipeline()
     
-    def update(self, enemy_detected, track_age, distance, 
-               velocity_confidence):
+    # Stereo cameras
+    mono_left = pipeline.create(dai.node.MonoCamera)
+    mono_right = pipeline.create(dai.node.MonoCamera)
+    stereo = pipeline.create(dai.node.StereoDepth)
+    
+    # Also get RGB for ArUco + visualization
+    cam_rgb = pipeline.create(dai.node.ColorCamera)
+    
+    # Outputs
+    xout_depth = pipeline.create(dai.node.XLinkOut)
+    xout_rgb = pipeline.create(dai.node.XLinkOut)
+    xout_depth.setStreamName("depth")
+    xout_rgb.setStreamName("rgb")
+    
+    # Configure mono cameras
+    mono_left.setResolution(dai.MonoCameraProperties.SensorResolution.THE_400_P)
+    mono_left.setCamera("left")
+    mono_right.setResolution(dai.MonoCameraProperties.SensorResolution.THE_400_P)
+    mono_right.setCamera("right")
+    
+    # Configure stereo depth
+    stereo.setDefaultProfilePreset(dai.node.StereoDepth.PresetMode.HIGH_DENSITY)
+    stereo.setDepthAlign(dai.CameraBoardSocket.CAM_A)  # align to RGB
+    stereo.setOutputSize(640, 400)
+    
+    # Depth range limits for overhead arena viewing
+    stereo.setDepthLowerThreshold(500)   # 0.5m min
+    stereo.setDepthUpperThreshold(3000)  # 3.0m max
+    
+    # Filters for cleaner depth
+    stereo.initialConfig.setMedianFilter(dai.MedianFilter.KERNEL_7x7)
+    config = stereo.initialConfig.get()
+    config.postProcessing.speckleFilter.enable = True
+    config.postProcessing.speckleFilter.speckleRange = 50
+    config.postProcessing.temporalFilter.enable = True
+    config.postProcessing.spatialFilter.enable = True
+    stereo.initialConfig.set(config)
+    
+    # Configure RGB
+    cam_rgb.setResolution(dai.ColorCameraProperties.SensorResolution.THE_1080_P)
+    cam_rgb.setPreviewSize(640, 400)
+    cam_rgb.setInterleaved(False)
+    
+    # Links
+    mono_left.out.link(stereo.left)
+    mono_right.out.link(stereo.right)
+    stereo.depth.link(xout_depth.input)
+    cam_rgb.preview.link(xout_rgb.input)
+    
+    return pipeline
+
+
+class DepthFloorDetector:
+    """Detect objects above the floor plane using depth data.
+    
+    For overhead camera: the floor is the FARTHEST surface.
+    Robots are CLOSER to the camera (lower depth values).
+    
+    Steps:
+    1. Calibrate floor depth (average depth of empty arena)
+    2. Each frame: threshold depth to find pixels significantly
+       closer than the floor
+    3. Contour detection on the thresholded mask
+    """
+    
+    def __init__(self, height_threshold_mm=40, min_area=200):
+        """
+        Args:
+            height_threshold_mm: objects must be at least this many mm
+                above the floor to be detected. 40mm = ~1.5 inches,
+                well below any robot's height.
+            min_area: minimum contour area in pixels
+        """
+        self.height_threshold_mm = height_threshold_mm
+        self.min_area = min_area
+        self.floor_depth = None  # median floor depth in mm
+        self._kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (7, 7))
+    
+    def calibrate_floor(self, depth_frame):
+        """Calibrate with empty arena. Call once at startup.
         
-        if not enemy_detected and track_age > 15:  # 250ms
-            return self.SEARCH
+        Args:
+            depth_frame: uint16 depth image from OAK-D (values in mm)
+        """
+        valid = depth_frame[depth_frame > 0]
+        if len(valid) == 0:
+            print("[depth] WARNING: no valid depth pixels for calibration")
+            return
         
-        if not enemy_detected and track_age <= 15:
-            return self.LOST
+        self.floor_depth = np.median(valid)
+        print(f"[depth] Floor calibrated at {self.floor_depth:.0f}mm "
+              f"({self.floor_depth/25.4:.1f} inches)")
+    
+    def detect(self, depth_frame, arena_mask=None):
+        """Detect objects above the floor.
         
-        if distance < 0.3:  # 30cm -- striking distance
-            return self.CLOSE
+        Args:
+            depth_frame: uint16 depth from OAK-D (mm)
+            arena_mask: optional uint8 mask (255=inside arena)
         
-        if velocity_confidence < 0.5:  # Need ~10 frames to estimate velocity
-            return self.ACQUIRE
+        Returns:
+            list of dicts with centroid, area, bbox, depth_mm, height_mm
+        """
+        if self.floor_depth is None:
+            return []
         
-        return self.INTERCEPT
+        # Objects are CLOSER to camera than the floor
+        # depth_frame < floor_depth - threshold means "above the floor"
+        valid_mask = depth_frame > 0
+        above_floor = depth_frame < (self.floor_depth - self.height_threshold_mm)
+        
+        object_mask = (valid_mask & above_floor).astype(np.uint8) * 255
+        
+        if arena_mask is not None:
+            object_mask = cv2.bitwise_and(object_mask, arena_mask)
+        
+        # Morphology cleanup
+        object_mask = cv2.morphologyEx(object_mask, cv2.MORPH_OPEN, self._kernel)
+        object_mask = cv2.morphologyEx(object_mask, cv2.MORPH_CLOSE, self._kernel)
+        
+        contours, _ = cv2.findContours(
+            object_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
+        )
+        
+        detections = []
+        for c in contours:
+            area = cv2.contourArea(c)
+            if area < self.min_area:
+                continue
+            
+            M = cv2.moments(c)
+            if M["m00"] > 0:
+                cx = M["m10"] / M["m00"]
+                cy = M["m01"] / M["m00"]
+                bbox = cv2.boundingRect(c)
+                
+                x, y, w, h = bbox
+                roi_depth = depth_frame[y:y+h, x:x+w]
+                valid_roi = roi_depth[roi_depth > 0]
+                obj_depth = np.median(valid_roi) if len(valid_roi) > 0 else 0
+                
+                detections.append({
+                    'centroid': (cx, cy),
+                    'area': area,
+                    'bbox': bbox,
+                    'depth_mm': obj_depth,
+                    'height_mm': self.floor_depth - obj_depth,
+                })
+        
+        return detections
 ```
 
-**Strategy per state:**
+### Practical OAK-D Notes
 
-| State | Strategy | Speed | Notes |
-|-------|----------|-------|-------|
-| SEARCH | Spin in place or patrol pattern | Low | Looking for enemy |
-| ACQUIRE | Pure pursuit toward detection | Medium | Building Kalman velocity estimate |
-| INTERCEPT | Proportional Navigation (N=4) | **Full** | Primary combat mode |
-| CLOSE | Pure pursuit, max throttle | **Full** | PN degenerates at close range |
-| LOST | Drive toward last predicted position | Medium | Coast on Kalman prediction |
+- **Camera height:** For an 8x8ft arena, camera at ~6-8ft height gives good depth resolution. At 6ft (~1800mm), a 3-inch (~75mm) tall robot is at depth ~1725mm. The 75mm difference is easily detectable.
+- **Depth resolution:** OAK-D stereo at 1-2m range has ~2-5mm depth resolution. More than enough.
+- **Frame alignment:** Use `stereo.setDepthAlign(dai.CameraBoardSocket.CAM_A)` so depth and RGB pixel coordinates match.
+- **Temporal filter:** Smooth depth noise across frames, reduces flickering detections.
+- **Invalid pixels:** Depth is 0 for invalid/out-of-range. Always filter these out.
+- **Alternative to RANSAC:** For a flat overhead view, simple median depth calibration works. RANSAC is needed when the camera is tilted and sees the floor at varying distances. Since our camera looks straight down, the floor is at a nearly constant depth.
 
-### 6.6 Handling Wall Bounces
+### Depth + RGB Fusion Pipeline
 
-In an 8x8ft enclosed arena, wall collisions are frequent. Predict wall bounces:
+The most robust approach combines depth (finding objects) with RGB (ArUco tracking, color ID):
 
 ```python
-def predict_with_walls(enemy_pos, enemy_vel, dt, 
-                        arena_min=(0,0), arena_max=(2.44, 2.44)):
-    """Predict enemy position accounting for wall bounces."""
-    pred_x = enemy_pos[0] + enemy_vel[0] * dt
-    pred_y = enemy_pos[1] + enemy_vel[1] * dt
-    vel_x, vel_y = enemy_vel
+class FusedDetector:
+    """Combines depth-based and RGB-based detection.
     
-    # Simple elastic bounce off walls
-    if pred_x < arena_min[0]:
-        pred_x = 2*arena_min[0] - pred_x
-        vel_x = -vel_x
-    elif pred_x > arena_max[0]:
-        pred_x = 2*arena_max[0] - pred_x
-        vel_x = -vel_x
+    Depth finds objects above the floor (immune to reference frame issues).
+    RGB provides ArUco tracking and color identification.
+    """
     
-    if pred_y < arena_min[1]:
-        pred_y = 2*arena_min[1] - pred_y
-        vel_y = -vel_y
-    elif pred_y > arena_max[1]:
-        pred_y = 2*arena_max[1] - pred_y
-        vel_y = -vel_y
+    def __init__(self):
+        self.depth_detector = DepthFloorDetector(height_threshold_mm=40)
+        self.color_self = ColorSelfTracker()
+        self.multi_tracker = MultiObjectTracker()
     
-    return (pred_x, pred_y), (vel_x, vel_y)
+    def update(self, rgb_frame, depth_frame, aruco_corners=None):
+        """Full detection pipeline.
+        
+        Returns:
+            our_pos: (x, y) in pixels or None
+            enemy_pos: (x, y) in pixels or None
+            enemy_vel: (vx, vy) in pixels/frame or None
+        """
+        # 1. Depth-based detection (finds ALL objects above floor)
+        depth_detections = self.depth_detector.detect(depth_frame)
+        centroids = [d['centroid'] for d in depth_detections]
+        
+        # 2. Multi-object tracking (assigns persistent IDs)
+        tracks = self.multi_tracker.update(centroids)
+        
+        # 3. Identify our robot (ArUco preferred, color fallback)
+        our_pos_known = None
+        if aruco_corners is not None:
+            our_pos_known = aruco_corners.mean(axis=0)
+        else:
+            color_center, _ = self.color_self.detect(rgb_frame)
+            if color_center is not None:
+                our_pos_known = np.array(color_center)
+        
+        # 4. Assign tracks
+        our_id, enemy_id = self.multi_tracker.identify_robots(
+            tracks, our_aruco_pos=our_pos_known
+        )
+        
+        our_pos = None
+        enemy_pos = None
+        enemy_vel = None
+        
+        for tid, pos, vel in tracks:
+            if tid == our_id:
+                our_pos = pos
+            elif tid == enemy_id:
+                enemy_pos = pos
+                enemy_vel = vel
+        
+        return our_pos, enemy_pos, enemy_vel
 ```
 
 ---
 
-## 7. Recommended Architecture
+## 5. Concrete Code Changes for B4B
 
-### 7.1 Full Pipeline Summary
+### Priority Order
 
-```
-Camera Frame (60fps)
-    |
-    +---> ArUco Detection ----> Our position + heading
-    |                                |
-    +---> MOG2 Background Sub        |
-    |         |                      |
-    |    Contour Filter              |
-    |    Exclude Our Robot <---------+
-    |         |
-    |    Enemy Detection (or None)
-    |         |
-    +---> Kalman Filter (predict always, update when detected)
-              |
-         Enemy position + velocity estimate
-              |
-         Intercept Point Calculation (quadratic)
-              |
-         EMA Smoothing on intercept point
-              |
-         Strategy FSM (SEARCH/ACQUIRE/INTERCEPT/CLOSE/LOST)
-              |
-         Guidance Law:
-           - INTERCEPT: Proportional Navigation (N=4)
-           - CLOSE: Pure Pursuit
-           - ACQUIRE: Pure Pursuit
-           - LOST: Coast to prediction
-           - SEARCH: Patrol pattern
-              |
-         Differential Drive Commands
-              |
-         Motor Output (UDP to ESP32)
-```
+1. **Kalman gating (30 minutes):** Change `enemy_tracker.py` `EnemyKalmanFilter.update()` to gate before updating. This is the single highest-impact fix -- stops detection teleportation from corrupting the track. See Section 3.
 
-### 7.2 Key Parameters Cheat Sheet
+2. **Pure pursuit controller (1-2 hours):** Replace the turn-stop-drive PathFollower with the PurePursuitController in `autonomy.py`. Wire it into the intercept mode in `main.py`. See Section 2.
 
-| Parameter | Value | Section |
-|-----------|-------|---------|
-| Navigation constant N | 4 | 1.4 |
-| Kalman sigma_a | 5.0 m/s^2 | 3.4 |
-| Kalman sigma_meas | 0.01 m | 3.5 |
-| Kalman max coast frames | 15 (~250ms) | 3.7 |
-| MOG2 history | 120 | 5.1 |
-| MOG2 varThreshold | 25-40 | 5.1 |
-| Contour min area | 400 px^2 | 5.3 |
-| Contour max area | 8000 px^2 | 5.3 |
-| Contour solidity min | 0.4 | 5.3 |
-| EMA alpha (intercept) | 0.3 | 6.3 |
-| Pure pursuit L_d | 0.3*V + 0.1 m | 4.4 |
-| Close range threshold | 0.3 m | 6.5 |
-| Prediction trust horizon | 0.5 s | 6.2 |
+3. **Color self-identification (1 hour):** Add neon green tape to robot, add `ColorSelfTracker` class, use as fallback in `EnemyDetector.detect()` when `our_robot_corners` is None. See Section 1, Solution A.
 
-### 7.3 Estimated Latency Budget
+4. **SORT multi-tracker (2-3 hours):** Replace single-object `EnemyDetector` with `MultiObjectTracker` + `identify_robots()`. This is the most architectural change but gives the most robustness. See Section 1, Solution B.
 
-| Stage | Time | Cumulative |
-|-------|------|------------|
-| Frame capture | 2 ms | 2 ms |
-| ArUco detection | 3 ms | 5 ms |
-| MOG2 + contours | 4 ms | 9 ms |
-| Kalman + intercept + PN | 0.3 ms | 9.3 ms |
-| EMA smoothing | 0.01 ms | 9.3 ms |
-| Motor command TX (UDP) | 1 ms | 10.3 ms |
-| **Total** | **~10 ms** | Well under 30ms target |
+5. **OAK-D depth detection (half day):** Switch from USB webcam to OAK-D, add depth pipeline, replace reference-frame diffing with depth floor subtraction. This is the production solution. See Section 4.
+
+### File Changes Summary
+
+| File | Change |
+|---|---|
+| `enemy_tracker.py` | Add Mahalanobis gating to `EnemyKalmanFilter.update()` |
+| `enemy_tracker.py` | Add `ColorSelfTracker` class, integrate into `EnemyDetector.detect()` |
+| `enemy_tracker.py` | (Later) Replace with `MultiObjectTracker` |
+| `autonomy.py` | Add `PurePursuitController` and `CombatPursuitController` classes |
+| `intercept.py` | Wire `CombatPursuitController` into pursuit FSM |
+| `main.py` | Replace PathFollower calls with PurePursuitController |
+| (new) `depth_detector.py` | OAK-D depth pipeline + DepthFloorDetector |
 
 ---
 
-## References
+## Sources
 
-- [Wikipedia - Proportional Navigation](https://en.wikipedia.org/wiki/Proportional_navigation)
-- [JHU APL - Basic Principles of Homing Guidance (Palumbo)](https://secwww.jhuapl.edu/techdigest/content/techdigest/pdf/V29-N01/29-01-Palumbo_Principles_Rev2018.pdf)
-- [ResearchGate - PN guidance for robotic interception of moving objects](https://www.researchgate.net/publication/230444899_Proportional_navigation_guidance_for_robotic_interception_of_moving_objects)
-- [ResearchGate - Augmented ideal PN guidance for robotic interception](https://www.researchgate.net/publication/3412043_Robotic_interception_of_moving_objects_using_an_augmented_ideal_proportional_navigation_guidance_technique)
-- [Calculating an intercept course (jaran.de)](http://jaran.de/goodbits/2011/07/17/calculating-an-intercept-course-to-a-target-with-constant-direction-and-velocity-in-a-2-dimensional-plane/)
-- [AI Projectile Intercept Formula (Medium)](https://medium.com/andys-coding-blog/ai-projectile-intercept-formula-for-gaming-without-trigonometry-37b70ef5718b)
-- [Cookie Robotics - Kalman Filter for 2D Motion](https://cookierobotics.com/071/)
-- [KalmanFilter.net - Examples](https://kalmanfilter.net/)
-- [IEEE - MSE Design of NCV Kalman Filters for Maneuvering Targets](https://ieeexplore.ieee.org/document/10032801/)
-- [MDPI - Self-Tuning Process Noise in Adaptive Kalman Filter](https://www.mdpi.com/2079-9292/12/18/3887)
-- [CMU - Pure Pursuit Path Tracking (Coulter 1992)](https://www.ri.cmu.edu/pub_files/pub3/coulter_r_craig_1992_1/coulter_r_craig_1992_1.pdf)
-- [Algorithms for Automated Driving - Pure Pursuit](https://thomasfermi.github.io/Algorithms-for-Automated-Driving/Control/PurePursuit.html)
-- [Purdue SIGBots - Basic Pure Pursuit](https://wiki.purduesigbots.com/software/control-algorithms/basic-pure-pursuit)
-- [OpenCV - BackgroundSubtractorMOG2](https://docs.opencv.org/3.4/d7/d7b/classcv_1_1BackgroundSubtractorMOG2.html)
-- [Simon Wenkel - Background Subtraction with OpenCV](https://www.simonwenkel.com/notes/software_libraries/opencv/background-subtraction-using-opencv.html)
-- [LearnOpenCV - Moving Object Detection](https://learnopencv.com/moving-object-detection-with-opencv/)
-- [OpenCV - Contour Properties](https://docs.opencv.org/3.4/d1/d32/tutorial_py_contour_properties.html)
-- [mbedded.ninja - EMA Filters](https://blog.mbedded.ninja/programming/signal-processing/digital-filters/exponential-moving-average-ema-filter/)
-- [ResearchGate - Double Exponential Smoothing for Predictive Tracking](https://www.researchgate.net/publication/268217162_Double_Exponential_Smoothing_for_Predictive_Vision_Based_Target_Tracking_of_a_Wheeled_Mobile_Robot)
+- [SORT: Simple Online Realtime Tracking (abewley/sort)](https://github.com/abewley/sort)
+- [SORT Explained (Roboflow)](https://blog.roboflow.com/sort-explained-real-time-object-tracking-in-python/)
+- [deep-sort-realtime PyPI](https://pypi.org/project/deep-sort-realtime/)
+- [Pure Pursuit - Algorithms for Automated Driving](https://thomasfermi.github.io/Algorithms-for-Automated-Driving/Control/PurePursuit.html)
+- [Pure Pursuit - Purdue SIGBots Wiki](https://wiki.purduesigbots.com/software/control-algorithms/basic-pure-pursuit)
+- [Pure Pursuit - CMU original paper (Coulter 1992)](https://www.ri.cmu.edu/pub_files/pub3/coulter_r_craig_1992_1/coulter_r_craig_1992_1.pdf)
+- [FRC Team 1712 Pure Pursuit (Python)](https://github.com/arimb/PurePursuit)
+- [PythonRobotics Pure Pursuit](https://github.com/AtsushiSakai/PythonRobotics/blob/master/PathTracking/pure_pursuit/pure_pursuit.py)
+- [Differential Drive Pure Pursuit Simulation](https://github.com/SamShue/Pure-Pursuit)
+- [FRC Team 1712 Pure Pursuit Wiki](https://github.com/Dawgma-1712/FRC-2018/wiki/pure-pursuit)
+- [Proportional Navigation (Python)](https://github.com/iwishiwasaneagle/proportional_navigation)
+- [propNav - 3DOF PN Missile Sim](https://github.com/gedeschaines/propNav)
+- [Robust Kalman Filter for Outlier Detection (Georgia Tech)](https://acds-lab.gatech.edu/papers/IROS2007_RobustKF.pdf)
+- [Robust Kalman Filtering via Mahalanobis Distance (Springer)](https://link.springer.com/article/10.1007/s00190-013-0690-8)
+- [Ultralytics Kalman Filter with Gating Distance](https://docs.ultralytics.com/reference/trackers/utils/kalman_filter/)
+- [filterpy - Python Kalman Filter Library](https://github.com/rlabbe/filterpy)
+- [oakmower - OAK-D Obstacle Detection](https://alemamm.github.io/oakmower/)
+- [DepthAI Spatial Location Calculator](https://oak-web.readthedocs.io/en/stable/samples/SpatialDetection/spatial_location_calculator/)
+- [DepthAI StereoDepth Node](https://docs.luxonis.com/projects/api/en/latest/components/nodes/stereo_depth/)
+- [pyRANSAC-3D](https://github.com/leomariga/pyRANSAC-3D)
+- [Detect Planes from Depth Image (ROS)](https://github.com/felixchenfy/ros_detect_planes_from_depth_img)
+- [NU-MSR Overhead Mobile Tracker](https://github.com/NU-MSR/overhead_mobile_tracker)
+- [Three Methods of Lateral Control (Pure Pursuit, Stanley, MPC)](https://dingyan89.medium.com/three-methods-of-vehicle-lateral-control-pure-pursuit-stanley-and-mpc-db8cc1d32081)

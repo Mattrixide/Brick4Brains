@@ -2,7 +2,7 @@
 
 Uses MOG2 background subtraction + contour filtering + Kalman filter
 to detect, track, and estimate velocity of the enemy robot.
-Our robot is excluded using its known ArUco bounding box.
+Our robot is excluded using ArUco bounding box proximity (works on mono/grayscale).
 """
 
 import math
@@ -55,7 +55,7 @@ class EnemyKalmanFilter:
         self.R = np.eye(2, dtype=np.float64) * sigma_meas**2
 
         self.frames_without_detection = 0
-        self.max_coast = 60  # ~1s at 60fps — stationary objects may flicker
+        self.max_coast = 120  # ~2s at 60fps — coast longer during charge
         self._initialized = False
 
     def predict(self):
@@ -69,7 +69,7 @@ class EnemyKalmanFilter:
         self.P = self.F @ self.P @ self.F.T + self.Q
 
     # Mahalanobis distance gate — reject measurements too far from prediction
-    GATE_THRESHOLD = 2.5  # tight gate — reject jumps aggressively
+    GATE_THRESHOLD = 4.0  # loosened — enemy gets rammed and flies across arena
 
     def update(self, measurement):
         """Update step — call with [x, y] when detection available, None otherwise."""
@@ -136,31 +136,31 @@ class EnemyKalmanFilter:
 
 
 # ---------------------------------------------------------------------------
-# Enemy detector — "Not-Us" with color assist
+# Enemy detector — "Not-Us" via ArUco exclusion (works on mono/grayscale)
 # ---------------------------------------------------------------------------
 
-# HSV ranges for yellow ArUco marker (tune per venue if needed)
-YELLOW_LOW = np.array([18, 80, 80], dtype=np.uint8)
-YELLOW_HIGH = np.array([38, 255, 255], dtype=np.uint8)
-
-# Fraction thresholds for blob classification
-YELLOW_FRAC_OURS = 0.15    # >15% yellow = our robot
-YELLOW_FRAC_ENEMY = 0.03   # <3% yellow = definitely enemy
+# Exclusion radius around ArUco marker center (pixels)
+ARUCO_EXCLUSION_RADIUS_PX = 80
 
 
 class EnemyDetector:
-    """Detects enemy by elimination: find all blobs, exclude ours by color.
+    """Detects enemy by elimination: find all foreground blobs, exclude ours by ArUco overlap.
 
-    No reference frame needed. Uses MOG2 for foreground detection +
-    yellow color classification to identify our robot vs enemy.
-    When blobs merge, splits by yellow vs non-yellow pixels.
+    Works on both color and mono/grayscale frames. Uses MOG2 for foreground
+    detection. Our robot is identified by proximity to its ArUco marker
+    bounding box — any blob overlapping the ArUco region is excluded.
 
-    Pipeline: MOG2 → morphology → arena mask → color classify → enemy centroid
+    Pipeline: (MOG2 | reference diff) → merge → morphology → arena mask → ArUco exclusion → enemy centroid
+
+    Reference frame mode: capture an empty arena frame, then absdiff against it
+    to detect anything that's not floor — works for stationary objects.
+    MOG2 catches moving objects. The two masks are OR'd together.
     """
 
     MIN_AREA = 400
     MAX_AREA = 30000
     MIN_SOLIDITY = 0.4
+    REF_DIFF_THRESHOLD = 35  # pixel intensity difference to count as foreground
 
     def __init__(self):
         self.bg_sub = cv2.createBackgroundSubtractorMOG2(
@@ -176,11 +176,14 @@ class EnemyDetector:
         self._last_fg_mask = None
         self._track_lock_px = None
         self._lock_stale_frames = 0  # how long lock hasn't moved
-        self._lock_stale_threshold = 120  # ~2 seconds at 60fps → reacquire
+        self._lock_stale_threshold = 300  # ~5 seconds at 60fps — enemy may be stationary
 
         # MOG2 warmup
         self._warmup_frames = 0
         self._warmup_needed = 90  # 1.5s at 60fps
+
+        # Reference frame (empty arena snapshot for static object detection)
+        self._reference_gray = None
 
     def set_arena_corners(self, corners_px, expand_px=30):
         """Set arena boundary polygon."""
@@ -197,13 +200,33 @@ class EnemyDetector:
             print(f"[enemy] Arena mask set ({len(corners_px)} corners, +{expand_px}px)")
 
     def capture_reference(self, frame):
-        """Reset MOG2 and track lock (replaces old reference frame capture)."""
+        """Capture empty arena as reference frame AND reset MOG2.
+
+        Call this when the arena is empty (no robots). The reference frame
+        is used for absdiff-based static object detection. MOG2 is also
+        reset so it learns the current background.
+        """
+        # Store grayscale reference
+        if len(frame.shape) == 3:
+            self._reference_gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        else:
+            self._reference_gray = frame.copy()
+
+        # Apply light blur to reduce noise in reference
+        self._reference_gray = cv2.GaussianBlur(self._reference_gray, (5, 5), 0)
+
+        # Reset MOG2
         self.bg_sub = cv2.createBackgroundSubtractorMOG2(
             history=300, varThreshold=40, detectShadows=False,
         )
         self._warmup_frames = 0
         self._track_lock_px = None
-        print(f"[enemy] MOG2 reset — warming up ({self._warmup_needed} frames)")
+        print(f"[enemy] Reference frame captured + MOG2 reset — warming up ({self._warmup_needed} frames)")
+
+    @property
+    def has_reference_frame(self) -> bool:
+        """True if an empty-arena reference frame has been captured."""
+        return self._reference_gray is not None
 
     @property
     def has_reference(self) -> bool:
@@ -212,12 +235,21 @@ class EnemyDetector:
     def detect(self, frame, our_robot_corners=None, use_reference_diff=True):
         """Detect enemy. Returns (cx, cy) in pixels or None.
 
+        Works on both BGR and grayscale frames. Uses ArUco bounding box
+        to exclude our robot — no color information needed.
+
         Args:
-            frame: BGR camera frame
-            our_robot_corners: ArUco corners (used for proximity check, not exclusion mask)
+            frame: camera frame (BGR or grayscale)
+            our_robot_corners: ArUco corners array for our robot exclusion
             use_reference_diff: ignored (kept for API compatibility)
         """
         h, w = frame.shape[:2]
+
+        # Convert to grayscale for MOG2 if needed (consistent 1-channel input)
+        if len(frame.shape) == 3:
+            gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        else:
+            gray = frame
 
         # MOG2 foreground
         # Fast learning during warmup to build background, then nearly frozen
@@ -226,8 +258,16 @@ class EnemyDetector:
             lr = 0.02  # fast warmup
         else:
             lr = 0.0002  # nearly frozen — 83 seconds to absorb
-        fg_mask = self.bg_sub.apply(frame, learningRate=lr)
+        fg_mask = self.bg_sub.apply(gray, learningRate=lr)
         _, fg_mask = cv2.threshold(fg_mask, 200, 255, cv2.THRESH_BINARY)
+
+        # Reference frame diff — catches stationary objects MOG2 misses
+        if self._reference_gray is not None and self._reference_gray.shape == gray.shape:
+            blurred = cv2.GaussianBlur(gray, (5, 5), 0)
+            diff = cv2.absdiff(blurred, self._reference_gray)
+            _, ref_mask = cv2.threshold(diff, self.REF_DIFF_THRESHOLD, 255, cv2.THRESH_BINARY)
+            # Merge: anything detected by EITHER method is foreground
+            fg_mask = cv2.bitwise_or(fg_mask, ref_mask)
 
         # Morphology
         fg_mask = cv2.morphologyEx(fg_mask, cv2.MORPH_OPEN, self._kernel_open)
@@ -247,14 +287,18 @@ class EnemyDetector:
         if self._warmup_frames < self._warmup_needed:
             return None
 
-        # Color classification
-        hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
-        yellow_mask = cv2.inRange(hsv, YELLOW_LOW, YELLOW_HIGH)
-
-        # ArUco center for proximity check
+        # Build ArUco exclusion zone from marker corners
         aruco_center = None
+        aruco_bbox = None  # (x_min, y_min, x_max, y_max) expanded bounding box
         if our_robot_corners is not None:
-            aruco_center = our_robot_corners.mean(axis=0)
+            corners = our_robot_corners.reshape(-1, 2)
+            aruco_center = corners.mean(axis=0)
+            # Expand bounding box around ArUco corners
+            x_min = corners[:, 0].min() - ARUCO_EXCLUSION_RADIUS_PX
+            x_max = corners[:, 0].max() + ARUCO_EXCLUSION_RADIUS_PX
+            y_min = corners[:, 1].min() - ARUCO_EXCLUSION_RADIUS_PX
+            y_max = corners[:, 1].max() + ARUCO_EXCLUSION_RADIUS_PX
+            aruco_bbox = (x_min, y_min, x_max, y_max)
 
         # Find contours
         contours, _ = cv2.findContours(
@@ -262,7 +306,6 @@ class EnemyDetector:
         )
 
         enemy_candidates = []
-        merged_enemy_pos = None
 
         for c in contours:
             area = cv2.contourArea(c)
@@ -279,40 +322,18 @@ class EnemyDetector:
             cx = M["m10"] / M["m00"]
             cy = M["m01"] / M["m00"]
 
-            # Color analysis: what fraction of this blob is yellow?
-            blob_mask = np.zeros((h, w), dtype=np.uint8)
-            cv2.drawContours(blob_mask, [c], -1, 255, -1)
-            yellow_in_blob = cv2.bitwise_and(yellow_mask, blob_mask)
-            yellow_count = cv2.countNonZero(yellow_in_blob)
-            blob_pixels = cv2.countNonZero(blob_mask)
-            yellow_frac = yellow_count / blob_pixels if blob_pixels > 0 else 0
+            # ArUco exclusion: skip blob if centroid is inside our robot's zone
+            if aruco_bbox is not None:
+                if aruco_bbox[0] <= cx <= aruco_bbox[2] and aruco_bbox[1] <= cy <= aruco_bbox[3]:
+                    continue
 
-            # Near ArUco?
-            near_aruco = False
+            # Also check distance to ArUco center for blobs just outside bbox
             if aruco_center is not None:
                 dist = math.sqrt((cx - aruco_center[0])**2 + (cy - aruco_center[1])**2)
-                near_aruco = dist < 120
+                if dist < ARUCO_EXCLUSION_RADIUS_PX:
+                    continue
 
-            # Classification
-            if near_aruco and yellow_frac > YELLOW_FRAC_ENEMY:
-                # Our robot — skip
-                continue
-
-            if yellow_frac > YELLOW_FRAC_OURS:
-                # Mostly yellow — it's ours even without ArUco
-                continue
-
-            if yellow_frac > YELLOW_FRAC_ENEMY and area > 5000:
-                # MERGED BLOB: contains some yellow (ours) + mostly not-yellow (enemy)
-                # Split: find centroid of non-yellow pixels
-                not_yellow = cv2.bitwise_and(blob_mask, cv2.bitwise_not(yellow_mask))
-                not_yellow = cv2.erode(not_yellow, self._kernel_open)
-                nM = cv2.moments(not_yellow)
-                if nM["m00"] > 0:
-                    merged_enemy_pos = (nM["m10"] / nM["m00"], nM["m01"] / nM["m00"])
-                continue
-
-            # Not yellow, not near ArUco → enemy candidate
+            # Passed all filters — enemy candidate
             enemy_candidates.append((cx, cy, area))
 
         # Pick best candidate
@@ -330,10 +351,6 @@ class EnemyDetector:
                 enemy_candidates.sort(key=lambda c: c[2], reverse=True)
                 result = (enemy_candidates[0][0], enemy_candidates[0][1])
 
-        # Fallback to merged blob split
-        if result is None and merged_enemy_pos is not None:
-            result = merged_enemy_pos
-
         if result is not None:
             # Check if lock is stale (hasn't moved in ~2 seconds)
             if self._track_lock_px is not None:
@@ -345,11 +362,9 @@ class EnemyDetector:
                     self._lock_stale_frames = 0
 
                 if self._lock_stale_frames > self._lock_stale_threshold:
-                    # Lock is stale — drop it and reacquire
                     self._track_lock_px = None
                     self._lock_stale_frames = 0
                     print("[enemy] Track lock stale — reacquiring")
-                    # Pick largest blob instead of nearest to stale position
                     if enemy_candidates:
                         enemy_candidates.sort(key=lambda c: c[2], reverse=True)
                         result = (enemy_candidates[0][0], enemy_candidates[0][1])
@@ -409,12 +424,12 @@ class EnemyTracker:
                     det_px = None
                 else:
                     det_m = (x_cm / 100.0, y_cm / 100.0)
-                    # Speed gate — enemy can't move more than 50cm between frames
-                    # (~30m/s at 60fps — way beyond any beetleweight)
+                    # Speed gate — enemy can't teleport, but can get rammed far
+                    # 150cm allows for being launched across the 8ft arena
                     if self.kalman._initialized:
                         pred = self.kalman.position
                         jump_m = math.sqrt((det_m[0]-pred[0])**2 + (det_m[1]-pred[1])**2)
-                        if jump_m > 0.5:  # 50cm max between frames
+                        if jump_m > 1.5:  # 150cm max between frames
                             det_px = None  # reject — physically impossible
                             det_m = None
                         else:

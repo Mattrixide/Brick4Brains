@@ -63,10 +63,13 @@ class EnemyKalmanFilter:
         if not self._initialized:
             return
         self.x = self.F @ self.x
+        # Clamp position to arena bounds (2.0m = 200cm)
+        self.x[0] = np.clip(self.x[0], -2.0, 2.0)
+        self.x[1] = np.clip(self.x[1], -2.0, 2.0)
         self.P = self.F @ self.P @ self.F.T + self.Q
 
     # Mahalanobis distance gate — reject measurements too far from prediction
-    GATE_THRESHOLD = 4.0  # ~95% chi-squared for 2 DOF
+    GATE_THRESHOLD = 3.0  # tighter gate — reject more aggressively
 
     def update(self, measurement):
         """Update step — call with [x, y] when detection available, None otherwise."""
@@ -149,7 +152,7 @@ class EnemyDetector:
     """
 
     # Contour filter thresholds (720p, overhead camera)
-    MIN_AREA = 400       # px² (~20×20) — lower for small robots
+    MIN_AREA = 500       # px² (~22×22)
     MAX_AREA = 25000     # px² (~158×158) — larger to handle close-up perspective
     MIN_ASPECT = 0.3
     MAX_ASPECT = 3.0
@@ -220,6 +223,8 @@ class EnemyDetector:
         self._reference_gray = cv2.GaussianBlur(
             cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY), (5, 5), 0
         )
+        # Reset track lock — old lock from false detections would block real enemy
+        self._track_lock_px = None
         print(f"[enemy] Reference frame captured ({frame.shape[1]}x{frame.shape[0]})")
 
     @property
@@ -308,7 +313,7 @@ class EnemyDetector:
 
         # Reject teleporting detections — if closest candidate jumped too far
         # from last known position, it's probably our own robot or a ghost
-        MAX_JUMP_PX = 80  # max pixels between frames (~50cm at typical resolution)
+        MAX_JUMP_PX = 60  # max pixels between frames — tighter to reject more noise
 
         # If we have a tracked position, pick nearest candidate + reject teleports
         if self._track_lock_px is not None:
@@ -379,7 +384,14 @@ class EnemyTracker:
         if det_px is not None and px_to_cm is not None:
             try:
                 x_cm, y_cm = px_to_cm(det_px[0], det_px[1])
-                det_cm = (x_cm / 100.0, y_cm / 100.0)  # cm -> m for Kalman
+                # Arena bounds check — reject detections outside the arena
+                # (arena is ~244cm = 8ft, allow some margin)
+                ARENA_MAX_CM = 300.0
+                if abs(x_cm) > ARENA_MAX_CM or abs(y_cm) > ARENA_MAX_CM:
+                    det_px = None  # outside arena — reject
+                    # Uncomment for debug: print(f"[enemy] Rejected: ({x_cm:.0f},{y_cm:.0f})cm outside arena")
+                else:
+                    det_cm = (x_cm / 100.0, y_cm / 100.0)  # cm -> m for Kalman
             except (ValueError, cv2.error):
                 det_cm = None
 

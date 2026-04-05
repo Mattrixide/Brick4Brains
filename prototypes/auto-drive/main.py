@@ -366,17 +366,32 @@ class AutoDriveApp:
 
             # 2b. Enemy tracking (run in both intercept modes)
             if frame is not None and self.mode in (MODE_INTERCEPT, MODE_INTERCEPT_CHARGE):
-                # Use current ArUco corners, or last known if marker lost
+                # Use current ArUco corners, or predict position when marker lost
                 if pose is not None:
                     self._last_our_corners = pose.corners
+                    self._last_our_center_px = pose.corners.mean(axis=0)
+                elif hasattr(self, '_last_our_center_px') and self._our_velocity != (0, 0):
+                    # Dead-reckon our robot position using velocity
+                    # (approximate — keeps exclusion mask roughly correct during charge)
+                    vx_px = self._our_velocity[0] * (self.tracker._px_per_cm or 5.0) * dt
+                    vy_px = self._our_velocity[1] * (self.tracker._px_per_cm or 5.0) * dt
+                    self._last_our_center_px = (
+                        self._last_our_center_px[0] + vx_px,
+                        self._last_our_center_px[1] + vy_px,
+                    )
+                    # Build fake corners around predicted center (200px radius)
+                    cx, cy = int(self._last_our_center_px[0]), int(self._last_our_center_px[1])
+                    import numpy as _np
+                    self._last_our_corners = _np.array([
+                        [cx-50, cy-50], [cx+50, cy-50],
+                        [cx+50, cy+50], [cx-50, cy+50]
+                    ], dtype=_np.float32)
                 our_corners = getattr(self, '_last_our_corners', None)
-                # During charge: disable reference diff (our robot moving creates artifacts)
-                # Use MOG2 only which adapts to moving background
-                charging = self.mode == MODE_INTERCEPT_CHARGE
+                # Always use reference diff — predicted exclusion handles self-detection
                 self._enemy_tracker.update(
                     frame, our_corners,
                     px_to_cm=self.tracker.px_to_cm,
-                    use_reference_diff=not charging,
+                    use_reference_diff=True,
                 )
 
             # 3. Read controller
@@ -519,8 +534,13 @@ class AutoDriveApp:
                         self._pursuit_fsm.reset()
                         print(f"[intercept] HIT! dist={distance:.0f}cm — back to tracking")
                     elif state == PursuitState.LOST:
-                        throttle *= 0.3
-                        steering *= 0.3
+                        # Keep driving toward Kalman-predicted enemy position
+                        # (don't stop just because detection dropped for a few frames)
+                        lookahead = max(20.0, distance * 0.5)
+                        track_width = 15.0
+                        turn_factor = track_width * math.sin(alpha) / lookahead
+                        steering = max(-0.5, min(0.5, turn_factor * 1.2))
+                        throttle = 0.6  # reduced speed while coasting
                     elif state == PursuitState.SEARCH:
                         throttle = 0.0
                         steering = 0.0
@@ -798,6 +818,9 @@ class AutoDriveApp:
                             if self.mode == MODE_INTERCEPT and self._enemy_tracker.is_tracking:
                                 self.mode = MODE_INTERCEPT_CHARGE
                                 self._pursuit_fsm.reset()
+                                # Skip ACQUIRE — enemy already tracked, go straight to INTERCEPT
+                                self._pursuit_fsm._acquire_count = self._pursuit_fsm.ACQUIRE_FRAMES + 1
+                                self._charge_prev_steer = 0.0
                                 print("[main] CHARGE! Pursuing enemy")
                             elif self.mode == MODE_INTERCEPT_CHARGE:
                                 # SPACE again — stop charging, go back to tracking

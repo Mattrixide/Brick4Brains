@@ -91,12 +91,27 @@ def main():
                     cv2.putText(display, f"{int(area)}", (x, y-5),
                                 cv2.FONT_HERSHEY_SIMPLEX, 0.35, color, 1)
 
-        # Draw detection
+        # Draw detection + log state changes
         if detection is not None:
             cx, cy = int(detection[0]), int(detection[1])
             cv2.circle(display, (cx, cy), 12, (0, 0, 255), 3)
             cv2.putText(display, "ENEMY", (cx + 15, cy - 10),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
+            if not hasattr(main, '_was_detected'):
+                main._was_detected = False
+            if not main._was_detected:
+                print(f"[detect] LOCKED at ({cx},{cy})")
+                main._was_detected = True
+        else:
+            if hasattr(main, '_was_detected') and main._was_detected:
+                # Count contours that passed size filter
+                n_contours = 0
+                if fg is not None:
+                    for c in contours:
+                        if cv2.contourArea(c) > 100:
+                            n_contours += 1
+                print(f"[detect] LOST — {n_contours} contours visible")
+                main._was_detected = False
 
         # Show FG mask alongside
         fg = detector.fg_mask

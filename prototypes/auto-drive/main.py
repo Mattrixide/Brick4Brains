@@ -520,13 +520,11 @@ class AutoDriveApp:
                             self.mode = MODE_PIN
                             print(f"[intercept] PIN! enemy at wall ({ex:.0f},{ey:.0f}) — 5s hold")
                         else:
-                            # Mid-arena ram — back to tracking
-                            throttle = 0.0
-                            steering = 0.0
-                            self.comms.stop()
-                            self.mode = MODE_INTERCEPT
-                            self._pursuit_fsm.reset()
-                            print(f"[intercept] RAM! dist={distance:.0f}cm mid-arena — back to tracking")
+                            # Mid-arena ram — brief reverse to separate, then track
+                            self._saved_enemy_lock = self._enemy_tracker.detector._track_lock_px
+                            self._reverse_start_time = now
+                            self.mode = MODE_REVERSE
+                            print(f"[intercept] RAM! dist={distance:.0f}cm — reversing to separate")
                     elif state == PursuitState.LOST:
                         # Keep driving toward Kalman-predicted enemy position
                         # (don't stop just because detection dropped for a few frames)

@@ -46,6 +46,9 @@ from intercept import (
     PursuitFSM,
     PursuitState,
 )
+from state_machine import BattleController, BattleContext
+from battle_config import BattleConfig
+from match_timer import MatchTimer, PinTimer
 
 
 # ---------------------------------------------------------------------------
@@ -59,6 +62,13 @@ MODE_INTERCEPT = "intercept"       # tracking enemy, waiting for trigger
 MODE_INTERCEPT_CHARGE = "charging"  # actively pursuing enemy
 MODE_PIN = "pinning"               # pinning enemy to wall
 MODE_REVERSE = "reversing"         # backing away after pin
+MODE_BATTLE = "battle"             # HSM combat state machine
+
+# System mode lifecycle (overlays on top of robot mode)
+SYSTEM_CONFIG = "config"
+SYSTEM_PREMATCH = "prematch"
+SYSTEM_BATTLE = "battle"
+SYSTEM_POSTMATCH = "postmatch"
 
 
 # ---------------------------------------------------------------------------
@@ -86,6 +96,8 @@ class AutoDriveApp:
         self.args = args
         self.mode = MODE_IDLE
         self.running = True
+        self._system_mode = SYSTEM_CONFIG
+        self._flourish_timer = None  # for victory dance
 
         # Trail for dashboard visualization
         self.trail = deque(maxlen=200)
@@ -134,6 +146,19 @@ class AutoDriveApp:
         self._prev_pos = None
         self._our_max_speed_cm_s = 50.0  # tune based on robot capability
         self._intercept_prev_steering = 0.0  # slew rate limiter for intercept
+
+        # Battle state machine
+        self._battle_config = BattleConfig.load(
+            os.path.join(os.path.dirname(os.path.abspath(__file__)), "battle_config.json")
+        )
+        self._match_timer = MatchTimer(
+            self._battle_config.match_duration_s,
+            self._battle_config.urgency_ramp_start_s,
+        )
+        self._pin_timer = PinTimer(self._battle_config.pin_duration_s)
+        self._battle_controller = BattleController(
+            self._battle_config, self._match_timer, self._pin_timer
+        )
 
         # Click-to-point state
         self._click_target_px = None
@@ -486,7 +511,7 @@ class AutoDriveApp:
                 self._heading_fusion.update_no_cv()
 
             # 2b. Enemy tracking (run in ALL intercept-related modes)
-            if frame is not None and self.mode in (MODE_INTERCEPT, MODE_INTERCEPT_CHARGE, MODE_PIN, MODE_REVERSE):
+            if frame is not None and self.mode in (MODE_INTERCEPT, MODE_INTERCEPT_CHARGE, MODE_PIN, MODE_REVERSE, MODE_BATTLE):
                 # Pass ArUco corners for color-based classification (not exclusion mask)
                 our_corners = pose.corners if pose is not None else None
                 self._enemy_tracker.update(
@@ -805,6 +830,82 @@ class AutoDriveApp:
                     throttle = -0.5
                     steering = 0.0
 
+            elif self.mode == MODE_BATTLE:
+                # HSM combat state machine
+
+                # Postmatch flourish — victory spin then stop
+                if self._system_mode == SYSTEM_POSTMATCH and self._flourish_timer is not None:
+                    flourish_elapsed = now - self._flourish_timer
+                    if flourish_elapsed < 3.0:
+                        throttle = 0.0
+                        steering = 0.8
+                    else:
+                        self.mode = MODE_IDLE
+                        self._system_mode = SYSTEM_CONFIG
+                        self._flourish_timer = None
+                        self.comms.stop()
+                        print("[battle] Flourish complete — idle")
+                # Normal battle mode
+                else:
+                    # Check for controller override
+                    override = (abs(ctrl.throttle) > 0.25 or
+                                abs(ctrl.steering) > 0.25 or
+                                ctrl.buttons != 0)
+                    if override:
+                        print("[battle] Xbox override — switching to IDLE")
+                        self.mode = MODE_IDLE
+                        self._system_mode = SYSTEM_CONFIG
+                        self._match_timer.reset()
+                        self._battle_controller.reset()
+                        self.comms.stop()
+                        throttle = ctrl.throttle
+                        steering = ctrl.steering
+                        buttons = ctrl.buttons
+                    elif self._match_timer.is_expired:
+                        print("[battle] Match timer expired — victory flourish!")
+                        self._system_mode = SYSTEM_POSTMATCH
+                        self._flourish_timer = time.perf_counter()
+                        self._battle_controller.reset()
+                    else:
+                        # Build context from current sensor data
+                        enemy_pos = None
+                        enemy_heading = None
+                        enemy_vel = None
+                        e_detected = self._enemy_tracker.enemy_detected
+                        e_tracking = self._enemy_tracker.is_tracking
+                        e_frames_lost = self._enemy_tracker.kalman.frames_without_detection if hasattr(self._enemy_tracker, 'kalman') else 999
+                        dist = 999.0
+
+                        if e_tracking and self._enemy_tracker.position_cm is not None:
+                            enemy_pos = self._enemy_tracker.position_cm
+                            if detected:
+                                dist = math.hypot(
+                                    enemy_pos[0] - x_cm, enemy_pos[1] - y_cm
+                                )
+                            enemy_vel = (
+                                self._enemy_tracker.velocity_cm_s[0] if self._enemy_tracker.velocity_cm_s else 0.0,
+                                self._enemy_tracker.velocity_cm_s[1] if self._enemy_tracker.velocity_cm_s else 0.0,
+                            )
+
+                        ctx = BattleContext(
+                            our_pos=(x_cm, y_cm),
+                            our_heading_rad=heading_rad,
+                            our_velocity=self._our_velocity,
+                            enemy_pos=enemy_pos,
+                            enemy_heading_rad=enemy_heading,
+                            enemy_velocity=enemy_vel,
+                            enemy_detected=e_detected,
+                            enemy_tracking=e_tracking,
+                            frames_without_detection=e_frames_lost,
+                            distance_cm=dist,
+                            dt=dt,
+                            our_detected=detected,
+                        )
+                        output = self._battle_controller.tick(ctx)
+                        throttle = output.throttle
+                        steering = output.steering
+                        buttons = output.buttons
+
             elif self.mode == MODE_IDLE:
                 # Check for controller override — require deliberate input
                 override = (abs(ctrl.throttle) > 0.25 or
@@ -820,7 +921,7 @@ class AutoDriveApp:
             # 6. Apply inversions for ESP32 (invertThrottle=-1, invertSteering=-1)
             # The ESP32 applies its own invertThrottle=-1 and invertSteering=-1
             # so we pre-negate to cancel that out, then the ESC gets the right sign
-            if self.mode in (MODE_AUTO, MODE_INTERCEPT, MODE_INTERCEPT_CHARGE, MODE_PIN, MODE_REVERSE):
+            if self.mode in (MODE_AUTO, MODE_INTERCEPT, MODE_INTERCEPT_CHARGE, MODE_PIN, MODE_REVERSE, MODE_BATTLE):
                 steering = -steering
 
             if self.mode == MODE_AUTO:
@@ -858,7 +959,7 @@ class AutoDriveApp:
                     steering = min_steering if steering > 0 else -min_steering
 
             # 6b. Heading-hold micro-corrections (IMU-based)
-            if self.mode in (MODE_AUTO, MODE_INTERCEPT_CHARGE):
+            if self.mode in (MODE_AUTO, MODE_INTERCEPT_CHARGE, MODE_BATTLE):
                 steering = self._heading_hold_correction(throttle, steering, dt)
 
             # 7. Send motor command
@@ -1120,6 +1221,8 @@ class AutoDriveApp:
             self.mode = new_mode
             if new_mode == MODE_IDLE:
                 self.follower = PathFollower()
+                self._match_timer.reset()
+                self._battle_controller.reset()
                 self.comms.stop()
 
         elif cmd_type == "emergency_stop":
@@ -1168,6 +1271,37 @@ class AutoDriveApp:
                     print(f"[main] Click goto: pixel=({px_x:.0f},{px_y:.0f}) -> ({x_cm:.1f},{y_cm:.1f})cm")
                 except ValueError as e:
                     print(f"[main] Click goto failed: {e}")
+
+        elif cmd_type == "start_battle":
+            print("[main] Starting battle!")
+            self._system_mode = SYSTEM_BATTLE
+            self._battle_controller.reset()
+            self._match_timer.reset()
+            self._match_timer.start()
+            self._pin_timer.reset()
+            self._flourish_timer = None
+            self.mode = MODE_BATTLE
+
+        elif cmd_type == "stop_battle":
+            print("[main] Stopping battle")
+            self._system_mode = SYSTEM_CONFIG
+            self._match_timer.reset()
+            self._battle_controller.reset()
+            self._flourish_timer = None
+            self.mode = MODE_IDLE
+            self.comms.stop()
+
+        elif cmd_type == "battle_config":
+            config_data = cmd.get("config", {})
+            self._battle_config.update(**config_data)
+            config_path = os.path.join(
+                os.path.dirname(os.path.abspath(__file__)), "battle_config.json"
+            )
+            self._battle_config.save(config_path)
+            # Reinit timers if durations changed
+            self._match_timer.duration_s = self._battle_config.match_duration_s
+            self._pin_timer.duration_s = self._battle_config.pin_duration_s
+            print(f"[main] Battle config updated: {config_data}")
 
         elif cmd_type == "calibrate":
             self._handle_calibration(cmd)
@@ -1340,6 +1474,21 @@ class AutoDriveApp:
             self.shared_state["px_per_cm"] = self.tracker._px_per_cm or 5.0
             self.shared_state["origin_x"] = self.tracker._origin_x
             self.shared_state["origin_y"] = self.tracker._origin_y
+
+            # Battle state machine fields
+            self.shared_state["system_mode"] = self._system_mode
+            if self.mode == MODE_BATTLE:
+                self.shared_state["battle_state"] = self._battle_controller.state
+                self.shared_state["match_remaining_s"] = round(self._match_timer.remaining_s, 1)
+                self.shared_state["pin_remaining_s"] = (
+                    round(self._pin_timer.remaining_s, 1) if self._pin_timer.is_running else None
+                )
+                self.shared_state["urgency"] = round(self._match_timer.urgency, 2)
+            else:
+                self.shared_state["battle_state"] = None
+                self.shared_state["match_remaining_s"] = None
+                self.shared_state["pin_remaining_s"] = None
+                self.shared_state["urgency"] = None
 
             if self.follower.active:
                 self.shared_state["mission_progress"] = self.follower.mission_progress

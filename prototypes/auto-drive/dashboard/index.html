@@ -1,0 +1,421 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Auto-Drive Dashboard</title>
+  <link rel="stylesheet" href="css/styles.css">
+</head>
+<body>
+
+<!-- Sidebar -->
+<aside class="sidebar">
+  <div class="sidebar__brand">
+    <h1>Auto-Drive</h1>
+    <div class="subtitle">CV Autonomous Control</div>
+  </div>
+  <nav class="sidebar__nav">
+    <div class="nav-section">Dashboard</div>
+    <a href="#" data-section="status" class="active">Status</a>
+    <a href="#" data-section="live">Live View</a>
+    <a href="#" data-section="missions">Missions</a>
+    <a href="#" data-section="settings">Settings</a>
+    <a href="#" data-section="battle">Battle</a>
+    <div class="nav-section">Quick Actions</div>
+    <a href="#" id="nav-estop" class="nav-danger">Emergency Stop</a>
+    <a href="#" id="nav-reset">Reset to Idle</a>
+  </nav>
+  <div class="sidebar__footer">
+    <span class="status-indicator status-indicator--offline" id="sidebar-mode-dot"></span>
+    <span id="sidebar-mode-text">IDLE</span><br>
+    ESP32: <span id="sidebar-esp32">--</span><br>
+    <span class="text-sm">Detected: <span id="sidebar-detected">No</span></span>
+  </div>
+</aside>
+
+<!-- Mobile overlay -->
+<div class="sidebar-overlay"></div>
+
+<!-- Main content -->
+<div class="main">
+
+  <!-- Top bar -->
+  <header class="topbar">
+    <button class="hamburger" aria-label="Toggle navigation">&#9776;</button>
+    <div class="topbar__title">Status</div>
+    <div class="topbar__meta">
+      <span class="badge badge--idle" id="topbar-mode-badge">IDLE</span>
+    </div>
+  </header>
+
+  <!-- Content -->
+  <div class="content">
+
+    <!-- ============ SECTION: Status ============ -->
+    <div id="section-status">
+
+      <!-- Key Metrics -->
+      <div class="grid grid--4 mb-6">
+        <div class="metric-card" id="mc-mode">
+          <div class="metric-card__value" id="m-mode">IDLE</div>
+          <div class="metric-card__label">Mode</div>
+        </div>
+        <div class="metric-card metric-card--accent">
+          <div class="metric-card__value" id="m-fps">--</div>
+          <div class="metric-card__label">FPS</div>
+        </div>
+        <div class="metric-card">
+          <div class="metric-card__value" id="m-position">-- , --</div>
+          <div class="metric-card__label">Position (x, y cm)</div>
+        </div>
+        <div class="metric-card">
+          <div class="metric-card__value" id="m-heading">--</div>
+          <div class="metric-card__label">Heading</div>
+        </div>
+      </div>
+
+      <!-- Top-Down View -->
+      <div class="card mb-6">
+        <div class="card__header">
+          <h2 class="card__title">Top-Down View</h2>
+          <span class="badge badge--info" id="detected-badge">No Detection</span>
+        </div>
+        <div style="text-align:center;padding:8px">
+          <canvas id="topdown-canvas" width="400" height="400" style="background:#1a1a2e;border-radius:6px;max-width:100%"></canvas>
+        </div>
+      </div>
+
+      <!-- Connection Info -->
+      <div class="card">
+        <div class="card__header">
+          <h2 class="card__title">Connection Info</h2>
+        </div>
+        <div class="table-wrapper">
+          <table>
+            <tbody>
+              <tr><td style="font-weight:600;width:160px">ESP32 Host</td><td id="info-esp32" class="text-mono">--</td></tr>
+              <tr><td style="font-weight:600">Marker Detected</td><td id="info-detected">--</td></tr>
+              <tr><td style="font-weight:600">Current Mission</td><td id="info-mission">--</td></tr>
+              <tr>
+                <td style="font-weight:600">Mission Progress</td>
+                <td>
+                  <div class="progress-bar">
+                    <div class="progress-bar__fill" id="mission-progress-fill" style="width:0%"></div>
+                  </div>
+                  <span class="text-sm text-secondary" id="mission-progress-text">0%</span>
+                </td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+    </div>
+
+    <!-- ============ SECTION: Live View ============ -->
+    <div id="section-live" style="display:none">
+
+      <div class="section-header">
+        <h2>Live Camera View</h2>
+        <p>MJPEG stream from camera with ArUco tracking overlay</p>
+      </div>
+
+      <div class="card">
+        <div class="card__header">
+          <h2 class="card__title">Camera Feed</h2>
+          <span class="badge badge--idle" id="live-mode-badge">IDLE</span>
+          <span class="badge badge--accent" id="live-fps-badge" style="margin-left:8px">-- FPS</span>
+          <button class="cmd-btn" id="grid-toggle" style="margin-left:8px">Grid: ON</button>
+        </div>
+        <div style="text-align:center;padding:8px">
+          <img id="live-feed" src="/api/video_feed" alt="Camera Feed"
+               style="max-width:100%;border-radius:6px;background:#1a1a2e;cursor:crosshair"
+               onerror="this.alt='Camera feed unavailable — waiting for frames...'">
+          <div style="margin-top:8px;display:flex;align-items:center;gap:12px;justify-content:center;flex-wrap:wrap">
+            <label style="display:flex;align-items:center;gap:6px">
+              <input type="radio" name="live-tool" value="navigate" checked>
+              <span class="text-sm">Click to Navigate</span>
+            </label>
+            <label style="display:flex;align-items:center;gap:6px">
+              <input type="radio" name="live-tool" value="measure">
+              <span class="text-sm">Measure Tool (click 2 points)</span>
+            </label>
+            <span class="text-sm text-secondary" id="measure-result"></span>
+          </div>
+        </div>
+      </div>
+
+    </div>
+
+    <!-- ============ SECTION: Missions ============ -->
+    <div id="section-missions" style="display:none">
+
+      <div class="section-header">
+        <h2>Missions</h2>
+        <p>Execute autonomous driving missions</p>
+      </div>
+
+      <!-- Autonomy Mixing -->
+      <div class="grid grid--2 mb-6">
+        <div class="card">
+          <div class="card__header">
+            <h2 class="card__title">Throttle</h2>
+          </div>
+          <div style="padding:16px">
+            <label style="display:flex;align-items:center;gap:12px;margin-bottom:8px">
+              <span style="min-width:50px">Mix:</span>
+              <input type="range" id="auto-throttle-mix" min="10" max="100" value="60" style="flex:1">
+              <span id="auto-throttle-mix-val" style="font-weight:600;min-width:40px">60%</span>
+            </label>
+            <p class="text-sm text-secondary">Limits max throttle during autonomous missions</p>
+          </div>
+        </div>
+        <div class="card">
+          <div class="card__header">
+            <h2 class="card__title">Steering</h2>
+          </div>
+          <div style="padding:16px">
+            <label style="display:flex;align-items:center;gap:12px;margin-bottom:8px">
+              <span style="min-width:50px">Mix:</span>
+              <input type="range" id="auto-steering-mix" min="10" max="100" value="80" style="flex:1">
+              <span id="auto-steering-mix-val" style="font-weight:600;min-width:40px">80%</span>
+            </label>
+            <p class="text-sm text-secondary">Limits max steering during autonomous missions</p>
+          </div>
+        </div>
+      </div>
+
+      <div class="cmd-grid mb-6">
+
+        <div class="cmd-card cmd-card--success">
+          <h3>Drive Square</h3>
+          <p>Drive a square pattern of the given side length</p>
+          <div class="mission-param">
+            <label>Size (cm):</label>
+            <input type="number" id="param-square-size" value="60" min="10" max="200" step="5">
+          </div>
+          <button class="cmd-btn cmd-btn--primary" data-mission="drive_square" data-param-input="param-square-size" data-param-key="size_cm">Execute</button>
+          <div class="cmd-card__result" id="res-drive-square"></div>
+        </div>
+
+        <div class="cmd-card cmd-card--accent">
+          <h3>Forward &amp; Back</h3>
+          <p>Drive forward then reverse by the given distance</p>
+          <div class="mission-param">
+            <label>Distance (cm):</label>
+            <input type="number" id="param-fwdback-dist" value="60" min="10" max="200" step="5">
+          </div>
+          <button class="cmd-btn cmd-btn--primary" data-mission="forward_back" data-param-input="param-fwdback-dist" data-param-key="distance_cm">Execute</button>
+          <div class="cmd-card__result" id="res-forward-back"></div>
+        </div>
+
+        <div class="cmd-card cmd-card--warning">
+          <h3>Drive Circle</h3>
+          <p>Drive in a circular path with the given radius</p>
+          <div class="mission-param">
+            <label>Radius (cm):</label>
+            <input type="number" id="param-circle-radius" value="30" min="10" max="120" step="5">
+          </div>
+          <button class="cmd-btn cmd-btn--primary" data-mission="drive_circle" data-param-input="param-circle-radius" data-param-key="radius_cm">Execute</button>
+          <div class="cmd-card__result" id="res-drive-circle"></div>
+        </div>
+
+      </div>
+
+    </div>
+
+    <!-- ============ SECTION: Settings ============ -->
+    <div id="section-settings" style="display:none">
+
+      <div class="section-header">
+        <h2>Settings</h2>
+        <p>Configuration and calibration</p>
+      </div>
+
+      <div class="config-bar mb-6">
+        <label for="settings-esp32">ESP32 Address:</label>
+        <input type="text" id="settings-esp32" placeholder="192.168.1.100">
+        <button class="cmd-btn cmd-btn--primary" id="settings-esp32-save">Save</button>
+      </div>
+
+      <!-- Floor Calibration -->
+      <div class="card mb-6">
+        <div class="card__header">
+          <h2 class="card__title">Floor Calibration</h2>
+          <span class="badge badge--info" id="calib-status">Not Calibrated</span>
+        </div>
+        <div style="padding:16px">
+          <!-- ChArUco calibration (recommended) -->
+          <div style="margin-bottom:16px;padding:12px;background:var(--color-bg);border-radius:6px">
+            <h3 style="margin-bottom:8px;font-size:0.95rem">ChArUco Board (Recommended)</h3>
+            <p class="text-sm text-secondary mb-4">Print the calibration board, lay it on the floor, click calibrate. Most accurate method.</p>
+            <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center">
+              <a href="/api/charuco_board" class="cmd-btn cmd-btn--primary" download>Download Board (PNG)</a>
+              <button class="cmd-btn cmd-btn--primary" id="calib-charuco">Calibrate from Board</button>
+            </div>
+            <p class="text-sm text-secondary" style="margin-top:8px">Print at 100% scale on 4 letter pages (2x2). Tape together. Verify squares are 50mm.</p>
+          </div>
+
+          <!-- Drive-around calibration (alternative) -->
+          <div style="margin-bottom:16px;padding:12px;background:var(--color-bg);border-radius:6px">
+            <h3 style="margin-bottom:8px;font-size:0.95rem">Drive-Around (Alternative)</h3>
+            <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center">
+              <button class="cmd-btn" id="calib-drive-start">Start Drive Calibration</button>
+              <button class="cmd-btn cmd-btn--danger" id="calib-drive-finish" style="display:none">Finish</button>
+              <span class="text-sm text-secondary" id="calib-point-count"></span>
+            </div>
+          </div>
+
+          <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:8px">
+            <button class="cmd-btn" id="calib-auto">Quick Auto-Calibrate</button>
+            <button class="cmd-btn" id="calib-save">Save</button>
+            <button class="cmd-btn" id="calib-load">Load</button>
+            <button class="cmd-btn cmd-btn--danger" id="calib-clear">Clear</button>
+          </div>
+
+          <div class="cmd-card__result" id="res-calib" style="margin-top:12px"></div>
+        </div>
+      </div>
+
+      <div class="card mb-6">
+        <div class="card__header">
+          <h2 class="card__title">System Info</h2>
+        </div>
+        <div class="table-wrapper">
+          <table>
+            <tbody>
+              <tr><td style="font-weight:600;width:180px">Camera Index</td><td id="settings-cam-idx" class="text-mono">1</td></tr>
+              <tr><td style="font-weight:600">Camera Backend</td><td id="settings-cam-backend" class="text-mono">MSMF</td></tr>
+              <tr><td style="font-weight:600">ArUco Dictionary</td><td class="text-mono">DICT_4X4_50</td></tr>
+              <tr><td style="font-weight:600">Marker Size</td><td class="text-mono">50mm</td></tr>
+              <tr><td style="font-weight:600">px_per_cm Scale</td><td id="settings-px-per-cm" class="text-mono">--</td></tr>
+              <tr><td style="font-weight:600">Latency Target</td><td class="text-mono">&lt;30ms</td></tr>
+              <tr><td style="font-weight:600">FPS Target</td><td class="text-mono">60 FPS</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+    </div>
+
+    <!-- ============ SECTION: Battle ============ -->
+    <div id="section-battle" style="display:none">
+
+      <div class="section-header">
+        <h2>Battle Mode</h2>
+        <p>Combat state machine controls and match timer</p>
+      </div>
+
+      <!-- Match Controls -->
+      <div class="card mb-6">
+        <div class="card__header">
+          <h2 class="card__title">Match Control</h2>
+          <span class="badge" id="battle-state-badge">--</span>
+        </div>
+        <div style="padding:16px">
+          <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:16px">
+            <button class="cmd-btn cmd-btn--primary" id="battle-start">Start Match</button>
+            <button class="cmd-btn cmd-btn--danger" id="battle-stop">Stop Match</button>
+          </div>
+
+          <!-- Timer Display -->
+          <div class="grid grid--4 mb-6">
+            <div class="metric-card metric-card--accent">
+              <div class="metric-card__value" id="battle-timer">3:00</div>
+              <div class="metric-card__label">Match Timer</div>
+            </div>
+            <div class="metric-card">
+              <div class="metric-card__value" id="battle-state-display">--</div>
+              <div class="metric-card__label">Current State</div>
+            </div>
+            <div class="metric-card">
+              <div class="metric-card__value" id="battle-pin-timer">--</div>
+              <div class="metric-card__label">Pin Timer</div>
+            </div>
+            <div class="metric-card metric-card--warning">
+              <div class="metric-card__value" id="battle-urgency">0%</div>
+              <div class="metric-card__label">Urgency</div>
+            </div>
+          </div>
+
+          <!-- Urgency Bar -->
+          <div style="margin-bottom:8px">
+            <div class="progress-bar">
+              <div class="progress-bar__fill" id="battle-urgency-bar" style="width:0%"></div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Battle Config -->
+      <div class="card mb-6">
+        <div class="card__header">
+          <h2 class="card__title">Battle Configuration</h2>
+        </div>
+        <div style="padding:16px">
+
+          <!-- Match Duration -->
+          <div class="config-bar mb-4">
+            <label for="battle-match-duration">Match Duration (s):</label>
+            <input type="number" id="battle-match-duration" value="180" min="10" max="600" step="10">
+          </div>
+
+          <!-- Pin Duration -->
+          <div class="config-bar mb-4">
+            <label for="battle-pin-duration">Pin Timer (s):</label>
+            <input type="number" id="battle-pin-duration" value="5" min="1" max="10" step="0.5">
+          </div>
+
+          <!-- Strategy -->
+          <div class="config-bar mb-4">
+            <label for="battle-strategy">Strategy:</label>
+            <select id="battle-strategy" style="padding:8px 12px;border:1px solid var(--color-border);border-radius:4px;font-family:var(--font-mono);min-width:160px">
+              <option value="charge">Charge (Ram &amp; Pin)</option>
+              <option value="pit">Pit (Herd to Pit)</option>
+              <option value="evade">Evade (Defense)</option>
+            </select>
+          </div>
+
+          <!-- Safe Side -->
+          <div class="config-bar mb-4">
+            <label>Safe Approach Side:</label>
+            <div style="display:flex;gap:12px;align-items:center">
+              <label style="display:flex;align-items:center;gap:4px">
+                <input type="radio" name="battle-safe-side" value="front" checked>
+                <span class="text-sm">Front</span>
+              </label>
+              <label style="display:flex;align-items:center;gap:4px">
+                <input type="radio" name="battle-safe-side" value="back">
+                <span class="text-sm">Back</span>
+              </label>
+              <label style="display:flex;align-items:center;gap:4px">
+                <input type="radio" name="battle-safe-side" value="left">
+                <span class="text-sm">Left</span>
+              </label>
+              <label style="display:flex;align-items:center;gap:4px">
+                <input type="radio" name="battle-safe-side" value="right">
+                <span class="text-sm">Right</span>
+              </label>
+            </div>
+          </div>
+
+          <!-- Pit Location -->
+          <div class="config-bar mb-4">
+            <label>Pit Location:</label>
+            <span class="text-mono text-sm" id="battle-pit-location">Not set</span>
+            <button class="cmd-btn" id="battle-set-pit" style="margin-left:8px">Set on Arena Canvas</button>
+          </div>
+
+          <button class="cmd-btn cmd-btn--primary" id="battle-save-config">Save Config</button>
+          <span class="text-sm text-secondary" id="battle-config-result" style="margin-left:8px"></span>
+        </div>
+      </div>
+
+    </div>
+
+  </div><!-- /content -->
+</div><!-- /main -->
+
+<script src="js/app.js"></script>
+</body>
+</html>

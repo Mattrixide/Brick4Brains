@@ -145,8 +145,56 @@ class EnemyKalmanFilter:
 # Enemy detector — "Not-Us" via ArUco exclusion (works on mono/grayscale)
 # ---------------------------------------------------------------------------
 
-# Exclusion radius around ArUco marker center (pixels)
+# Exclusion radius around ArUco marker center (pixels) — legacy fallback
 ARUCO_EXCLUSION_RADIUS_PX = 80
+
+# Robot body dimensions relative to ArUco marker size (50mm marker)
+# From screenshot: robot body is roughly 2.5x marker width, 1.5x marker length
+# Plus small margin for position error
+ROBOT_WIDTH_MARKER_SCALE = 3.0   # side-to-side
+ROBOT_LENGTH_MARKER_SCALE = 2.0  # front-to-back
+
+
+def _compute_robot_footprint(aruco_corners):
+    """Compute rotated rectangle polygon of our robot body from ArUco corners.
+
+    Returns 4x2 int32 array of polygon vertices, or None.
+    """
+    if aruco_corners is None:
+        return None
+    corners = aruco_corners.reshape(-1, 2).astype(np.float64)
+    if len(corners) != 4:
+        return None
+
+    center = corners.mean(axis=0)
+
+    # Marker size in pixels (average edge length)
+    edge1 = np.linalg.norm(corners[1] - corners[0])
+    edge2 = np.linalg.norm(corners[2] - corners[1])
+    marker_px = (edge1 + edge2) / 2
+
+    # Heading from top edge of marker
+    top_edge = corners[1] - corners[0]
+    heading = math.atan2(top_edge[1], top_edge[0])
+
+    # Robot half-dimensions in pixels
+    half_w = marker_px * ROBOT_WIDTH_MARKER_SCALE / 2
+    half_l = marker_px * ROBOT_LENGTH_MARKER_SCALE / 2
+
+    cos_h = math.cos(heading)
+    sin_h = math.sin(heading)
+
+    # Local corners: width along marker top-edge direction, length perpendicular
+    local = np.array([
+        [-half_w, -half_l],
+        [half_w, -half_l],
+        [half_w, half_l],
+        [-half_w, half_l],
+    ])
+
+    R = np.array([[cos_h, -sin_h], [sin_h, cos_h]])
+    rotated = (R @ local.T).T + center
+    return rotated.astype(np.int32)
 
 
 class EnemyDetector:
@@ -182,6 +230,9 @@ class EnemyDetector:
 
         # Last winning contour (for orientation estimation)
         self._last_contour = None
+
+        # Our robot footprint polygon (for debug overlay)
+        self._robot_footprint = None
 
         # Reference frame (empty arena snapshot — primary detection method)
         self._reference_gray = None
@@ -275,6 +326,18 @@ class EnemyDetector:
                 cv2.fillPoly(self._arena_mask, [self._arena_pts], 255)
             fg_mask = cv2.bitwise_and(fg_mask, self._arena_mask)
 
+        # Subtract our robot's footprint from foreground mask
+        # This replaces the old per-contour ArUco exclusion and handles
+        # the blob-merge case when robots are in contact
+        self._robot_footprint = _compute_robot_footprint(our_robot_corners)
+        if self._robot_footprint is not None:
+            cv2.fillPoly(fg_mask, [self._robot_footprint], 0)
+        elif our_robot_corners is not None:
+            # Fallback: simple circle exclusion if footprint computation fails
+            corners = our_robot_corners.reshape(-1, 2)
+            center = corners.mean(axis=0).astype(np.int32)
+            cv2.circle(fg_mask, tuple(center), ARUCO_EXCLUSION_RADIUS_PX, 0, -1)
+
         self._last_fg_mask = fg_mask
 
         # Warmup
@@ -282,20 +345,7 @@ class EnemyDetector:
         if self._warmup_frames < self._warmup_needed:
             return None
 
-        # Build ArUco exclusion zone from marker corners
-        aruco_center = None
-        aruco_bbox = None  # (x_min, y_min, x_max, y_max) expanded bounding box
-        if our_robot_corners is not None:
-            corners = our_robot_corners.reshape(-1, 2)
-            aruco_center = corners.mean(axis=0)
-            # Expand bounding box around ArUco corners
-            x_min = corners[:, 0].min() - ARUCO_EXCLUSION_RADIUS_PX
-            x_max = corners[:, 0].max() + ARUCO_EXCLUSION_RADIUS_PX
-            y_min = corners[:, 1].min() - ARUCO_EXCLUSION_RADIUS_PX
-            y_max = corners[:, 1].max() + ARUCO_EXCLUSION_RADIUS_PX
-            aruco_bbox = (x_min, y_min, x_max, y_max)
-
-        # Find contours
+        # Find contours (our robot already masked out)
         contours, _ = cv2.findContours(
             fg_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
         )
@@ -316,17 +366,6 @@ class EnemyDetector:
                 continue
             cx = M["m10"] / M["m00"]
             cy = M["m01"] / M["m00"]
-
-            # ArUco exclusion: skip blob if centroid is inside our robot's zone
-            if aruco_bbox is not None:
-                if aruco_bbox[0] <= cx <= aruco_bbox[2] and aruco_bbox[1] <= cy <= aruco_bbox[3]:
-                    continue
-
-            # Also check distance to ArUco center for blobs just outside bbox
-            if aruco_center is not None:
-                dist = math.sqrt((cx - aruco_center[0])**2 + (cy - aruco_center[1])**2)
-                if dist < ARUCO_EXCLUSION_RADIUS_PX:
-                    continue
 
             # Check if this blob overlaps with temporal diff (is it moving?)
             # Sample temporal mask at centroid ± small region
@@ -683,6 +722,17 @@ class EnemyTracker:
         """True if enemy appears to be spinning in place."""
         return self.orientation.is_spinning
 
+    def contact_estimate_cm(self, our_pos_cm, our_heading_rad,
+                             contact_distance_cm: float = 15.0):
+        """Estimate enemy position during contact (when vision is occluded).
+
+        Assumes enemy is directly in front of us at contact_distance.
+        Use when is_tracking but enemy_detected is False (Kalman coasting).
+        """
+        ex = our_pos_cm[0] + contact_distance_cm * math.cos(our_heading_rad)
+        ey = our_pos_cm[1] + contact_distance_cm * math.sin(our_heading_rad)
+        return np.array([ex, ey])
+
     @property
     def position_m(self):
         """Kalman-filtered position in meters."""
@@ -771,6 +821,11 @@ class EnemyTracker:
         lock = self.detector._track_lock_px
         if lock is not None:
             cv2.circle(frame, (int(lock[0]), int(lock[1])), 4, (0, 255, 0), -1)
+
+        # Show our robot footprint mask (magenta outline)
+        footprint = self.detector._robot_footprint
+        if footprint is not None:
+            cv2.polylines(frame, [footprint], True, (255, 0, 255), 2)
 
     def reset(self):
         self.kalman.reset()

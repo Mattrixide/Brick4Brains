@@ -139,7 +139,7 @@ class AutoDriveApp:
         self._load_drive_calibration()
 
         # Enemy tracking + interception
-        self._enemy_tracker = EnemyTracker(dt=1/30, sigma_a=2.0, sigma_meas_cm=5.0)
+        self._enemy_tracker = EnemyTracker(dt=1/60, sigma_a=5.0, sigma_meas_cm=5.0)
         self._pursuit_fsm = PursuitFSM()
         self._smoothed_intercept = SmoothedIntercept(alpha=0.3)
         self._our_velocity = (0.0, 0.0)  # estimated from position changes
@@ -162,6 +162,11 @@ class AutoDriveApp:
 
         # Click-to-point state
         self._click_target_px = None
+
+        # Pit calibration state (2-click workflow)
+        self._pit_calibrating = False
+        self._pit_corner1_px = None  # first click pixel coords
+        self._pit_corner1_cm = None  # first click world coords
 
         # Measurement overlay (persists on frame until cleared)
         self._measure_line = None  # ((x1_px,y1_px), (x2_px,y2_px), dist_cm, label)
@@ -962,8 +967,15 @@ class AutoDriveApp:
             if self.mode in (MODE_AUTO, MODE_INTERCEPT_CHARGE, MODE_BATTLE):
                 steering = self._heading_hold_correction(throttle, steering, dt)
 
+            # 6c. ESC dead zone boost for battle mode
+            if self.mode == MODE_BATTLE:
+                if 0 < abs(throttle) < 0.25:
+                    throttle = 0.25 if throttle > 0 else -0.25
+                if 0 < abs(steering) < 0.20:
+                    steering = 0.20 if steering > 0 else -0.20
+
             # 7. Send motor command
-            if self.mode in (MODE_AUTO, MODE_INTERCEPT_CHARGE) and (abs(throttle) > 0.01 or abs(steering) > 0.01):
+            if self.mode in (MODE_AUTO, MODE_INTERCEPT_CHARGE, MODE_BATTLE) and (abs(throttle) > 0.01 or abs(steering) > 0.01):
                 if not hasattr(self, '_cmd_log_t'):
                     self._cmd_log_t = 0
                 if now - self._cmd_log_t > 1.0:
@@ -1009,6 +1021,7 @@ class AutoDriveApp:
                         MODE_INTERCEPT_CHARGE: (0, 0, 255),
                         MODE_PIN: (0, 255, 255),
                         MODE_REVERSE: (255, 0, 255),
+                        MODE_BATTLE: (0, 255, 100),
                     }.get(self.mode, (200, 200, 200))
                     cv2.putText(
                         stream_frame, f"Mode: {self.mode.upper()}", (10, 30),
@@ -1058,12 +1071,39 @@ class AutoDriveApp:
                             stream_frame,
                             cm_to_px=self.tracker.cm_to_px,
                         )
-                        # Draw pursuit state
-                        state_text = f"Pursuit: {self._pursuit_fsm.state.upper()}"
-                        cv2.putText(stream_frame, state_text, (10, 90),
-                                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 200, 255), 1)
+                        if self.mode == MODE_BATTLE:
+                            # Show HSM state instead of old PursuitFSM
+                            bstate = self._battle_controller.state
+                            state_colors = {
+                                "scan": (150, 150, 150), "acquire": (0, 200, 255),
+                                "charge_pursue": (0, 100, 255), "charge_flank": (0, 150, 255),
+                                "charge_ram": (0, 0, 255), "charge_pin": (0, 255, 255),
+                                "pit_position": (0, 200, 100), "pit_push": (0, 255, 0),
+                                "pit_commit": (0, 255, 50), "pit_abort": (0, 200, 200),
+                                "evade_retreat": (255, 0, 200), "evade_reposition": (200, 100, 255),
+                                "unstick": (0, 165, 255), "lost_target": (100, 100, 100),
+                            }
+                            sc = state_colors.get(bstate, (200, 200, 200))
+                            cv2.putText(stream_frame, bstate.upper().replace("_", " "),
+                                        (10, 90), cv2.FONT_HERSHEY_SIMPLEX, 0.6, sc, 2)
+                            # Match timer
+                            rem = self._match_timer.remaining_s
+                            mins = int(rem) // 60
+                            secs = int(rem) % 60
+                            timer_text = f"Match: {mins}:{secs:02d}"
+                            urg = self._match_timer.urgency
+                            urg_color = (0, 255, 255) if urg < 0.5 else (0, 165, 255) if urg < 0.8 else (0, 0, 255)
+                            cv2.putText(stream_frame, timer_text, (10, 120),
+                                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, urg_color, 1)
+                            cv2.putText(stream_frame, f"Urgency: {urg:.0%}", (180, 120),
+                                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, urg_color, 1)
+                        else:
+                            # Old pursuit FSM state for legacy modes
+                            state_text = f"Pursuit: {self._pursuit_fsm.state.upper()}"
+                            cv2.putText(stream_frame, state_text, (10, 90),
+                                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 200, 255), 1)
 
-                    # PIN countdown overlay
+                    # PIN countdown overlay (both old MODE_PIN and new battle charge_pin)
                     if self.mode == MODE_PIN and hasattr(self, '_pin_start_time'):
                         remaining = max(0, 5.0 - (time.perf_counter() - self._pin_start_time))
                         h_f, w_f = stream_frame.shape[:2]
@@ -1077,11 +1117,58 @@ class AutoDriveApp:
                                     cv2.FONT_HERSHEY_SIMPLEX, 4, (0, 255, 255), 8)
                         cv2.putText(stream_frame, "PINNING", (tx, ty - 80),
                                     cv2.FONT_HERSHEY_SIMPLEX, 1.5, (0, 255, 255), 3)
+                    elif self.mode == MODE_BATTLE and self._battle_controller.state == "charge_pin":
+                        remaining = max(0, self._pin_timer.remaining_s)
+                        h_f, w_f = stream_frame.shape[:2]
+                        countdown_text = f"{remaining:.1f}"
+                        text_size = cv2.getTextSize(countdown_text, cv2.FONT_HERSHEY_SIMPLEX, 4, 8)[0]
+                        tx = (w_f - text_size[0]) // 2
+                        ty = (h_f + text_size[1]) // 2
+                        cv2.putText(stream_frame, countdown_text, (tx+3, ty+3),
+                                    cv2.FONT_HERSHEY_SIMPLEX, 4, (0, 0, 0), 10)
+                        cv2.putText(stream_frame, countdown_text, (tx, ty),
+                                    cv2.FONT_HERSHEY_SIMPLEX, 4, (0, 255, 100), 8)
+                        cv2.putText(stream_frame, "PINNING", (tx, ty - 80),
+                                    cv2.FONT_HERSHEY_SIMPLEX, 1.5, (0, 255, 100), 3)
 
                     elif self.mode == MODE_REVERSE:
                         h_f, w_f = stream_frame.shape[:2]
                         cv2.putText(stream_frame, "REVERSING", (w_f//2 - 150, h_f//2),
                                     cv2.FONT_HERSHEY_SIMPLEX, 2, (255, 0, 255), 5)
+
+                    # Pit calibration in-progress overlay
+                    if self._pit_calibrating:
+                        h_f, w_f = stream_frame.shape[:2]
+                        if self._pit_corner1_px is None:
+                            cv2.putText(stream_frame, "PIT CAL: Click corner 1", (10, h_f - 20),
+                                        cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
+                        else:
+                            cv2.circle(stream_frame, self._pit_corner1_px, 8, (0, 0, 255), -1)
+                            cv2.putText(stream_frame, "PIT CAL: Click opposite corner", (10, h_f - 20),
+                                        cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
+
+                    # Draw pit overlay if configured
+                    if (self._battle_config.pit_x_cm != 0 or self._battle_config.pit_y_cm != 0):
+                        try:
+                            pit_half = self._battle_config.pit_radius_cm
+                            pit_cx, pit_cy = self._battle_config.pit_x_cm, self._battle_config.pit_y_cm
+                            # Draw pit rectangle using corners
+                            corners_cm = [
+                                (pit_cx - pit_half, pit_cy - pit_half),
+                                (pit_cx + pit_half, pit_cy - pit_half),
+                                (pit_cx + pit_half, pit_cy + pit_half),
+                                (pit_cx - pit_half, pit_cy + pit_half),
+                            ]
+                            corners_px = []
+                            for cx_cm, cy_cm in corners_cm:
+                                px, py = self.tracker.cm_to_px(cx_cm, cy_cm)
+                                corners_px.append((int(px), int(py)))
+                            pts = np.array(corners_px, dtype=np.int32)
+                            cv2.polylines(stream_frame, [pts], True, (0, 0, 255), 2, cv2.LINE_AA)
+                            cv2.putText(stream_frame, "PIT", (corners_px[0][0], corners_px[0][1] - 8),
+                                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 1)
+                        except (ValueError, cv2.error):
+                            pass  # calibration not loaded yet
 
                     # Draw IMU fusion status
                     if self._telemetry.is_active:
@@ -1157,6 +1244,18 @@ class AutoDriveApp:
                                 self._pursuit_fsm.reset()
                                 self._enemy_tracker.reset()
                                 print("[main] Intercept TRACKING — press SPACE to charge")
+                        elif key == ord("t"):
+                            # Pit calibration — mark 2 opposite corners
+                            if self._pit_calibrating:
+                                self._pit_calibrating = False
+                                self._pit_corner1_px = None
+                                self._pit_corner1_cm = None
+                                print("[pit-cal] Pit calibration cancelled")
+                            else:
+                                self._pit_calibrating = True
+                                self._pit_corner1_px = None
+                                self._pit_corner1_cm = None
+                                print("[pit-cal] Click two OPPOSITE corners of the pit on the camera view")
                         elif key == ord(" "):
                             # SPACE — trigger charge from tracking mode
                             if self.mode == MODE_INTERCEPT and self._enemy_tracker.is_tracking:
@@ -1280,6 +1379,7 @@ class AutoDriveApp:
             self._match_timer.start()
             self._pin_timer.reset()
             self._flourish_timer = None
+            self._enemy_tracker.reset()
             self.mode = MODE_BATTLE
 
         elif cmd_type == "stop_battle":
@@ -1445,10 +1545,60 @@ class AutoDriveApp:
                 self._filtered_y = None
 
     def _on_cv_click(self, event, x, y, flags, param):
-        """Mouse callback for click-to-point on the CV window."""
+        """Mouse callback for click-to-point or pit calibration on the CV window."""
         if event != cv2.EVENT_LBUTTONDOWN:
             return
 
+        # Pit calibration mode — 2-click workflow
+        if self._pit_calibrating:
+            try:
+                x_cm, y_cm = self.tracker.px_to_cm(x, y)
+            except (ValueError, cv2.error) as e:
+                print(f"[pit-cal] Failed to convert pixel ({x},{y}): {e}")
+                return
+
+            if self._pit_corner1_px is None:
+                # First corner
+                self._pit_corner1_px = (x, y)
+                self._pit_corner1_cm = (x_cm, y_cm)
+                print(f"[pit-cal] Corner 1: pixel=({x},{y}) -> ({x_cm:.1f},{y_cm:.1f})cm")
+                print("[pit-cal] Now click the OPPOSITE corner of the pit")
+            else:
+                # Second corner — compute pit bounds
+                c1 = self._pit_corner1_cm
+                c2 = (x_cm, y_cm)
+                pit_min_x = min(c1[0], c2[0])
+                pit_max_x = max(c1[0], c2[0])
+                pit_min_y = min(c1[1], c2[1])
+                pit_max_y = max(c1[1], c2[1])
+                pit_cx = (pit_min_x + pit_max_x) / 2
+                pit_cy = (pit_min_y + pit_max_y) / 2
+                pit_w = pit_max_x - pit_min_x
+                pit_h = pit_max_y - pit_min_y
+                pit_radius = max(pit_w, pit_h) / 2
+
+                print(f"[pit-cal] Corner 2: pixel=({x},{y}) -> ({x_cm:.1f},{y_cm:.1f})cm")
+                print(f"[pit-cal] Pit: center=({pit_cx:.1f},{pit_cy:.1f}) size={pit_w:.1f}x{pit_h:.1f}cm")
+
+                # Update battle config
+                self._battle_config.pit_x_cm = pit_cx
+                self._battle_config.pit_y_cm = pit_cy
+                self._battle_config.pit_radius_cm = pit_radius
+                self._battle_config.pit_danger_radius_cm = pit_radius + 15.0
+
+                # Save to disk
+                config_path = os.path.join(
+                    os.path.dirname(os.path.abspath(__file__)), "battle_config.json"
+                )
+                self._battle_config.save(config_path)
+                print(f"[pit-cal] Saved to {config_path}")
+
+                # Done
+                self._pit_calibrating = False
+                self._pit_corner1_px = None
+            return
+
+        # Normal click-to-point
         try:
             x_cm, y_cm = self.tracker.px_to_cm(x, y)
         except (ValueError, cv2.error) as e:

@@ -87,11 +87,17 @@ class EnemyKalmanFilter:
             y = z - self.H @ self.x
             S = self.H @ self.P @ self.H.T + self.R
 
-            # Mahalanobis gating — reject teleporting measurements
+            # Adaptive Mahalanobis gating — widens when measurements are rejected
+            gate = self.GATE_THRESHOLD * (1.0 + 0.5 * self.frames_without_detection)
+            gate = min(gate, self.GATE_THRESHOLD * 4)  # cap at 4x
             mahal_sq = float(y.T @ np.linalg.inv(S) @ y)
-            if mahal_sq > self.GATE_THRESHOLD ** 2:
-                # Measurement is too far from prediction — reject it
+            if mahal_sq > gate ** 2:
                 self.frames_without_detection += 1
+                # Soft reset after 8 consecutive rejections — filter has diverged
+                if self.frames_without_detection >= 8:
+                    self.x[:2] = z  # snap position to measurement
+                    self.P *= 50.0  # inflate covariance
+                    self.frames_without_detection = 0
                 return
 
             K = self.P @ self.H.T @ np.linalg.inv(S)
@@ -160,14 +166,9 @@ class EnemyDetector:
     MIN_AREA = 400
     MAX_AREA = 30000
     MIN_SOLIDITY = 0.4
-    REF_DIFF_THRESHOLD = 35  # pixel intensity difference to count as foreground
+    REF_DIFF_THRESHOLD = 20  # pixel intensity difference to count as foreground
 
     def __init__(self):
-        self.bg_sub = cv2.createBackgroundSubtractorMOG2(
-            history=300,
-            varThreshold=40,
-            detectShadows=False,
-        )
         self._kernel_open = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
         self._kernel_close = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (15, 15))
 
@@ -175,15 +176,16 @@ class EnemyDetector:
         self._arena_pts = None
         self._last_fg_mask = None
         self._track_lock_px = None
-        self._lock_stale_frames = 0  # how long lock hasn't moved
-        self._lock_stale_threshold = 300  # ~5 seconds at 60fps — enemy may be stationary
 
-        # MOG2 warmup
-        self._warmup_frames = 0
-        self._warmup_needed = 90  # 1.5s at 60fps
+        # Previous frame for temporal diff (detects moving objects)
+        self._prev_gray = None
 
-        # Reference frame (empty arena snapshot for static object detection)
+        # Reference frame (empty arena snapshot — primary detection method)
         self._reference_gray = None
+
+        # Warmup counter (allow a few frames for camera auto-exposure to settle)
+        self._warmup_frames = 0
+        self._warmup_needed = 30  # 0.5s at 60fps
 
     def set_arena_corners(self, corners_px, expand_px=30):
         """Set arena boundary polygon."""
@@ -200,28 +202,21 @@ class EnemyDetector:
             print(f"[enemy] Arena mask set ({len(corners_px)} corners, +{expand_px}px)")
 
     def capture_reference(self, frame):
-        """Capture empty arena as reference frame AND reset MOG2.
+        """Capture empty arena as reference frame.
 
         Call this when the arena is empty (no robots). The reference frame
-        is used for absdiff-based static object detection. MOG2 is also
-        reset so it learns the current background.
+        is used for absdiff-based detection of anything that isn't floor.
         """
-        # Store grayscale reference
         if len(frame.shape) == 3:
             self._reference_gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
         else:
             self._reference_gray = frame.copy()
 
-        # Apply light blur to reduce noise in reference
         self._reference_gray = cv2.GaussianBlur(self._reference_gray, (5, 5), 0)
-
-        # Reset MOG2
-        self.bg_sub = cv2.createBackgroundSubtractorMOG2(
-            history=300, varThreshold=40, detectShadows=False,
-        )
         self._warmup_frames = 0
         self._track_lock_px = None
-        print(f"[enemy] Reference frame captured + MOG2 reset — warming up ({self._warmup_needed} frames)")
+        self._prev_gray = None
+        print(f"[enemy] Reference frame captured — detection active")
 
     @property
     def has_reference_frame(self) -> bool:
@@ -235,8 +230,8 @@ class EnemyDetector:
     def detect(self, frame, our_robot_corners=None, use_reference_diff=True):
         """Detect enemy. Returns (cx, cy) in pixels or None.
 
-        Works on both BGR and grayscale frames. Uses ArUco bounding box
-        to exclude our robot — no color information needed.
+        Uses reference frame absdiff as primary detection (no MOG2).
+        Frame-to-frame diff tags moving objects to break ghost ties.
 
         Args:
             frame: camera frame (BGR or grayscale)
@@ -245,29 +240,26 @@ class EnemyDetector:
         """
         h, w = frame.shape[:2]
 
-        # Convert to grayscale for MOG2 if needed (consistent 1-channel input)
         if len(frame.shape) == 3:
             gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
         else:
             gray = frame
 
-        # MOG2 foreground
-        # Fast learning during warmup to build background, then nearly frozen
-        # so stationary enemies stay visible for the whole match
-        if self._warmup_frames < self._warmup_needed:
-            lr = 0.02  # fast warmup
-        else:
-            lr = 0.0002  # nearly frozen — 83 seconds to absorb
-        fg_mask = self.bg_sub.apply(gray, learningRate=lr)
-        _, fg_mask = cv2.threshold(fg_mask, 200, 255, cv2.THRESH_BINARY)
+        blurred = cv2.GaussianBlur(gray, (5, 5), 0)
 
-        # Reference frame diff — catches stationary objects MOG2 misses
+        # Primary: reference frame diff (detects anything not floor)
+        fg_mask = np.zeros((h, w), dtype=np.uint8)
         if self._reference_gray is not None and self._reference_gray.shape == gray.shape:
-            blurred = cv2.GaussianBlur(gray, (5, 5), 0)
             diff = cv2.absdiff(blurred, self._reference_gray)
-            _, ref_mask = cv2.threshold(diff, self.REF_DIFF_THRESHOLD, 255, cv2.THRESH_BINARY)
-            # Merge: anything detected by EITHER method is foreground
-            fg_mask = cv2.bitwise_or(fg_mask, ref_mask)
+            _, fg_mask = cv2.threshold(diff, self.REF_DIFF_THRESHOLD, 255, cv2.THRESH_BINARY)
+
+        # Secondary: frame-to-frame diff (tags moving objects)
+        temporal_mask = np.zeros((h, w), dtype=np.uint8)
+        if self._prev_gray is not None and self._prev_gray.shape == blurred.shape:
+            tdiff = cv2.absdiff(blurred, self._prev_gray)
+            _, temporal_mask = cv2.threshold(tdiff, 15, 255, cv2.THRESH_BINARY)
+            temporal_mask = cv2.morphologyEx(temporal_mask, cv2.MORPH_CLOSE, self._kernel_close)
+        self._prev_gray = blurred.copy()
 
         # Morphology
         fg_mask = cv2.morphologyEx(fg_mask, cv2.MORPH_OPEN, self._kernel_open)
@@ -333,44 +325,48 @@ class EnemyDetector:
                 if dist < ARUCO_EXCLUSION_RADIUS_PX:
                     continue
 
-            # Passed all filters — enemy candidate
-            enemy_candidates.append((cx, cy, area))
+            # Check if this blob overlaps with temporal diff (is it moving?)
+            # Sample temporal mask at centroid ± small region
+            cx_i, cy_i = int(cx), int(cy)
+            r = 20  # sample radius
+            y0, y1 = max(0, cy_i-r), min(h, cy_i+r)
+            x0, x1 = max(0, cx_i-r), min(w, cx_i+r)
+            is_moving = False
+            if y1 > y0 and x1 > x0:
+                region = temporal_mask[y0:y1, x0:x1]
+                is_moving = np.mean(region) > 30  # >30/255 means significant motion
 
-        # Pick best candidate
+            enemy_candidates.append((cx, cy, area, is_moving))
+
+        # Pick best candidate using scoring:
+        # - Moving blobs get priority (real enemy, not ghost)
+        # - Among same-moving-status, prefer largest blob
+        # - Track lock gives a small proximity bonus, not hard lock
         result = None
 
         if enemy_candidates:
             if self._track_lock_px is not None:
                 lx, ly = self._track_lock_px
-                enemy_candidates.sort(key=lambda c: (c[0]-lx)**2 + (c[1]-ly)**2)
-                best = enemy_candidates[0]
-                dist = math.sqrt((best[0]-lx)**2 + (best[1]-ly)**2)
-                if dist < 250:
-                    result = (best[0], best[1])
+                # Score = moving_bonus + area_score - distance_penalty
+                for i, (cx, cy, area, moving) in enumerate(enemy_candidates):
+                    dist = math.sqrt((cx-lx)**2 + (cy-ly)**2)
+                    score = 0.0
+                    score += 5000 if moving else 0      # strong preference for moving
+                    score += area                        # larger = more likely real robot
+                    score -= dist * 0.5                  # mild proximity preference
+                    enemy_candidates[i] = (cx, cy, area, moving, score)
+                enemy_candidates.sort(key=lambda c: c[4], reverse=True)
             else:
-                enemy_candidates.sort(key=lambda c: c[2], reverse=True)
-                result = (enemy_candidates[0][0], enemy_candidates[0][1])
+                # No lock — score by moving + area only
+                for i, (cx, cy, area, moving) in enumerate(enemy_candidates):
+                    score = (5000 if moving else 0) + area
+                    enemy_candidates[i] = (cx, cy, area, moving, score)
+                enemy_candidates.sort(key=lambda c: c[4], reverse=True)
 
+            result = (enemy_candidates[0][0], enemy_candidates[0][1])
+
+        # Update lock to follow the detection
         if result is not None:
-            # Check if lock is stale (hasn't moved in ~2 seconds)
-            if self._track_lock_px is not None:
-                dx = result[0] - self._track_lock_px[0]
-                dy = result[1] - self._track_lock_px[1]
-                if abs(dx) < 5 and abs(dy) < 5:
-                    self._lock_stale_frames += 1
-                else:
-                    self._lock_stale_frames = 0
-
-                if self._lock_stale_frames > self._lock_stale_threshold:
-                    self._track_lock_px = None
-                    self._lock_stale_frames = 0
-                    print("[enemy] Track lock stale — reacquiring")
-                    if enemy_candidates:
-                        enemy_candidates.sort(key=lambda c: c[2], reverse=True)
-                        result = (enemy_candidates[0][0], enemy_candidates[0][1])
-                        self._track_lock_px = result
-                    return result
-
             self._track_lock_px = result
 
         return result
@@ -424,14 +420,20 @@ class EnemyTracker:
                     det_px = None
                 else:
                     det_m = (x_cm / 100.0, y_cm / 100.0)
-                    # Speed gate — enemy can't teleport, but can get rammed far
-                    # 150cm allows for being launched across the 8ft arena
+                    # Speed gate — adaptive, widens when filter is coasting
                     if self.kalman._initialized:
                         pred = self.kalman.position
                         jump_m = math.sqrt((det_m[0]-pred[0])**2 + (det_m[1]-pred[1])**2)
-                        if jump_m > 1.5:  # 150cm max between frames
-                            det_px = None  # reject — physically impossible
-                            det_m = None
+                        # Base gate 50cm, widens with missed frames up to 300cm
+                        gate_m = 0.5 + 0.3 * self.kalman.frames_without_detection
+                        gate_m = min(gate_m, 3.0)
+                        if jump_m > gate_m:
+                            # Too far — but if we've been coasting, accept and reset
+                            if self.kalman.frames_without_detection >= 5:
+                                det_cm = det_m  # accept anyway, Kalman will soft-reset
+                            else:
+                                det_px = None
+                                det_m = None
                         else:
                             det_cm = det_m
                     else:

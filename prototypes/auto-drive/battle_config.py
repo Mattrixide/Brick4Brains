@@ -13,7 +13,7 @@ VALID_STRATEGIES = ("charge", "pit", "evade")
 @dataclass
 class BattleConfig:
     # Match timing
-    match_duration_s: float = 180.0
+    match_duration_s: float = 60.0
     pin_duration_s: float = 5.0
     reverse_duration_s: float = 2.0
     unstick_oscillate_s: float = 1.5

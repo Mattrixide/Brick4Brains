@@ -38,6 +38,9 @@ class BattleContext:
     distance_cm: float = 999.0
     dt: float = 0.016
     our_detected: bool = False  # our ArUco visible
+    accel_x_mg: float = 0.0    # forward acceleration in milligravity
+    accel_y_mg: float = 0.0    # lateral acceleration in milligravity
+    throttle_cmd: float = 0.0  # what we're commanding (for stuck detection)
 
 
 @dataclass
@@ -159,19 +162,26 @@ class BattleController:
         # --- Global transitions (checked every tick) ---
         current = self.state
 
+        # Wall impact detection — sudden deceleration spike (>1500mg = ~1.5g)
+        accel_mag = math.hypot(ctx.accel_x_mg, ctx.accel_y_mg)
+        if (current.startswith("charge") and accel_mag > 1500
+                and abs(ctx.throttle_cmd) > 0.3):
+            log.info("[battle] IMPACT detected (%.0fmg) — reversing", accel_mag)
+            self._enter_retreat(reason="impact")
+            return self._action_evade_retreat(ctx, now)
+
         # Stuck detection (not while already unsticking or retreating)
         if current not in ("unstick", "evade_retreat", "evade_reposition"):
             if self._is_stuck(ctx):
                 self._enter_unstick()
                 return self._action_unstick(ctx, now)
 
-        # ArUco lost too long during charge/pit → retreat
-        # But only if enemy is also lost — if we're tracking the enemy,
-        # keep fighting even if our own marker is spotty (common near walls)
+        # ArUco lost → we can't see ourselves (probably at a wall)
+        # Give it time — brief ArUco drops are normal near walls
+        # Only retreat after sustained loss (~1 second)
         if current.startswith("charge") or current.startswith("pit"):
-            if (self._aruco_lost_frames > self.cfg.lost_timeout_frames
-                    and not ctx.enemy_tracking):
-                self._enter_retreat(reason="aruco_lost")
+            if self._aruco_lost_frames > 60:  # ~1 second at 60fps
+                self._enter_retreat(reason="aruco_lost_wall")
                 return self._action_evade_retreat(ctx, now)
 
         # Enemy lost → lost_target (from combat states, not evade/unstick)
@@ -201,7 +211,11 @@ class BattleController:
 
         action = action_map.get(current)
         if action:
-            return action(ctx, now)
+            result = action(ctx, now)
+            # Global throttle cap (tune down for testing)
+            MAX_THROTTLE = 0.75
+            result.throttle = max(-MAX_THROTTLE, min(MAX_THROTTLE, result.throttle))
+            return result
 
         # Fallback — should not reach here
         return BattleOutput()
@@ -248,10 +262,36 @@ class BattleController:
             self.machine.set_state("scan")
             self._acquire_count = 0
 
-    # -- Stuck detection ----------------------------------------------------
+    # -- Stuck detection (IMU + position) ------------------------------------
 
     def _is_stuck(self, ctx: BattleContext) -> bool:
-        """Detect if robot is stuck (commanding throttle but not moving)."""
+        """Detect if robot is stuck using IMU + position history.
+
+        Two signals:
+        1. Position-based: no movement over ~0.8s while commanding throttle
+        2. IMU-based: commanding throttle but acceleration is near zero
+           (hitting a wall — motors spin but robot doesn't move)
+        """
+        # IMU-based: commanding forward but no forward acceleration
+        # accel_x_mg is in body frame — forward acceleration when driving
+        if abs(ctx.throttle_cmd) > 0.3:
+            accel_mag = math.hypot(ctx.accel_x_mg, ctx.accel_y_mg)
+            # When driving freely, accel is typically 100-500mg
+            # When stuck against a wall, accel drops to <50mg despite throttle
+            if not hasattr(self, '_stuck_accel_frames'):
+                self._stuck_accel_frames = 0
+            if accel_mag < 80:
+                self._stuck_accel_frames += 1
+            else:
+                self._stuck_accel_frames = 0
+            # Stuck if low accel for 30 frames (~0.5s) while commanding throttle
+            if self._stuck_accel_frames > 30:
+                self._stuck_accel_frames = 0
+                return True
+        else:
+            self._stuck_accel_frames = 0
+
+        # Position-based fallback (works even without IMU)
         if len(self._last_positions) < 10:
             return False
         oldest = self._last_positions[0]
@@ -260,7 +300,6 @@ class BattleController:
         if dt < 0.8:
             return False
         displacement = math.hypot(newest[0] - oldest[0], newest[1] - oldest[1])
-        # Stuck if < 3cm displacement over ~1s while presumably driving
         return displacement < 3.0
 
     # -- State entry helpers ------------------------------------------------
@@ -367,12 +406,12 @@ class BattleController:
         )
         alpha = _angle_diff(desired_heading, ctx.our_heading_rad)
 
-        # Way off → spin to face
+        # Way off → spin to face (fast)
         if abs(alpha) > 1.0:
             self._prev_steer = 0.0
             return BattleOutput(
                 throttle=0.0,
-                steering=0.6 if alpha > 0 else -0.6,
+                steering=1.0 if alpha > 0 else -1.0,
             )
 
         # Pure pursuit with slew rate limiting
@@ -387,9 +426,9 @@ class BattleController:
         steering = self._prev_steer + delta_s
         self._prev_steer = steering
 
-        # Throttle with urgency boost
-        base_throttle = 0.8 * (1.0 - abs(steering) * 0.3)
-        throttle = min(1.0, base_throttle * (1.0 + 0.3 * urgency))
+        # Full speed pursuit — back off slightly when turning hard
+        base_throttle = 1.0 * (1.0 - abs(steering) * 0.2)
+        throttle = min(1.0, base_throttle)
 
         return BattleOutput(throttle=throttle, steering=steering)
 
@@ -423,12 +462,12 @@ class BattleController:
             )
 
         steering = max(-0.5, min(0.5, alpha * 0.5))
-        return BattleOutput(throttle=0.5, steering=steering)
+        return BattleOutput(throttle=0.8, steering=steering)
 
     def _action_charge_ram(self, ctx: BattleContext, now: float) -> BattleOutput:
         """Full throttle final approach — push enemy to wall."""
         if ctx.enemy_pos is None:
-            return BattleOutput(throttle=0.8, steering=0.0)
+            return BattleOutput(throttle=1.0, steering=0.0)
 
         ex, ey = ctx.enemy_pos
         near_wall = abs(ex) > self.cfg.wall_threshold_cm or abs(ey) > self.cfg.wall_threshold_cm
@@ -654,7 +693,7 @@ class BattleController:
                 self._reengage(ctx)
             return BattleOutput()
 
-        return BattleOutput(throttle=-0.5, steering=0.0)
+        return BattleOutput(throttle=-0.8, steering=0.0)
 
     def _action_evade_reposition(self, ctx: BattleContext, now: float) -> BattleOutput:
         """Drive toward arena center for safety."""

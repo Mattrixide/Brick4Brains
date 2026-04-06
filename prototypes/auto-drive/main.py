@@ -887,10 +887,18 @@ class AutoDriveApp:
                                 dist = math.hypot(
                                     enemy_pos[0] - x_cm, enemy_pos[1] - y_cm
                                 )
-                            enemy_vel = (
-                                self._enemy_tracker.velocity_cm_s[0] if self._enemy_tracker.velocity_cm_s else 0.0,
-                                self._enemy_tracker.velocity_cm_s[1] if self._enemy_tracker.velocity_cm_s else 0.0,
-                            )
+                            vel_arr = self._enemy_tracker.velocity_cm_s
+                            if vel_arr is not None:
+                                enemy_vel = (float(vel_arr[0]), float(vel_arr[1]))
+                            else:
+                                enemy_vel = (0.0, 0.0)
+
+                        # Get IMU accelerometer data
+                        accel_x, accel_y = 0.0, 0.0
+                        if self._telemetry.is_active:
+                            tel = self._telemetry.get()
+                            accel_x = tel.get("accel_x", 0.0)
+                            accel_y = tel.get("accel_y", 0.0)
 
                         ctx = BattleContext(
                             our_pos=(x_cm, y_cm),
@@ -905,6 +913,9 @@ class AutoDriveApp:
                             distance_cm=dist,
                             dt=dt,
                             our_detected=detected,
+                            accel_x_mg=accel_x,
+                            accel_y_mg=accel_y,
+                            throttle_cmd=throttle,
                         )
                         output = self._battle_controller.tick(ctx)
                         throttle = output.throttle
@@ -980,7 +991,14 @@ class AutoDriveApp:
                     self._cmd_log_t = 0
                 if now - self._cmd_log_t > 1.0:
                     self._cmd_log_t = now
-                    print(f"[cmd] SENDING thr={throttle:.2f} str={steering:.2f} mode={self.mode}")
+                    state_info = f" state={self._battle_controller.state}" if self.mode == MODE_BATTLE else ""
+                    aruco_info = f" aruco={'Y' if detected else 'N'}"
+                    accel_info = ""
+                    if self.mode == MODE_BATTLE and self._telemetry.is_active:
+                        tel = self._telemetry.get()
+                        amag = math.hypot(tel.get("accel_x", 0), tel.get("accel_y", 0))
+                        accel_info = f" accel={amag:.0f}mg"
+                    print(f"[cmd] thr={throttle:.2f} str={steering:.2f} pos=({x_cm:.0f},{y_cm:.0f}){aruco_info}{accel_info}{state_info}")
             self.comms.send(throttle, steering, buttons)
 
             # 8. Update dashboard state
@@ -1244,6 +1262,26 @@ class AutoDriveApp:
                                 self._pursuit_fsm.reset()
                                 self._enemy_tracker.reset()
                                 print("[main] Intercept TRACKING — press SPACE to charge")
+                        elif key == ord("b"):
+                            # Toggle battle mode
+                            if self.mode == MODE_BATTLE:
+                                self.mode = MODE_IDLE
+                                self._system_mode = SYSTEM_CONFIG
+                                self._match_timer.reset()
+                                self._battle_controller.reset()
+                                self._flourish_timer = None
+                                self.comms.stop()
+                                print("[main] Battle mode OFF")
+                            else:
+                                self._system_mode = SYSTEM_BATTLE
+                                self._battle_controller.reset()
+                                self._match_timer.reset()
+                                self._match_timer.start()
+                                self._pin_timer.reset()
+                                self._flourish_timer = None
+                                self._enemy_tracker.reset()
+                                self.mode = MODE_BATTLE
+                                print("[main] BATTLE MODE ON — match started!")
                         elif key == ord("t"):
                             # Pit calibration — mark 2 opposite corners
                             if self._pit_calibrating:

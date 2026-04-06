@@ -180,6 +180,9 @@ class EnemyDetector:
         # Previous frame for temporal diff (detects moving objects)
         self._prev_gray = None
 
+        # Last winning contour (for orientation estimation)
+        self._last_contour = None
+
         # Reference frame (empty arena snapshot — primary detection method)
         self._reference_gray = None
 
@@ -336,34 +339,30 @@ class EnemyDetector:
                 region = temporal_mask[y0:y1, x0:x1]
                 is_moving = np.mean(region) > 30  # >30/255 means significant motion
 
-            enemy_candidates.append((cx, cy, area, is_moving))
+            enemy_candidates.append((cx, cy, area, is_moving, c))
 
         # Pick best candidate using scoring:
         # - Moving blobs get priority (real enemy, not ghost)
         # - Among same-moving-status, prefer largest blob
         # - Track lock gives a small proximity bonus, not hard lock
         result = None
+        self._last_contour = None
 
         if enemy_candidates:
-            if self._track_lock_px is not None:
-                lx, ly = self._track_lock_px
-                # Score = moving_bonus + area_score - distance_penalty
-                for i, (cx, cy, area, moving) in enumerate(enemy_candidates):
+            scored = []
+            for cx, cy, area, moving, contour in enemy_candidates:
+                score = 0.0
+                score += 5000 if moving else 0
+                score += area
+                if self._track_lock_px is not None:
+                    lx, ly = self._track_lock_px
                     dist = math.sqrt((cx-lx)**2 + (cy-ly)**2)
-                    score = 0.0
-                    score += 5000 if moving else 0      # strong preference for moving
-                    score += area                        # larger = more likely real robot
-                    score -= dist * 0.5                  # mild proximity preference
-                    enemy_candidates[i] = (cx, cy, area, moving, score)
-                enemy_candidates.sort(key=lambda c: c[4], reverse=True)
-            else:
-                # No lock — score by moving + area only
-                for i, (cx, cy, area, moving) in enumerate(enemy_candidates):
-                    score = (5000 if moving else 0) + area
-                    enemy_candidates[i] = (cx, cy, area, moving, score)
-                enemy_candidates.sort(key=lambda c: c[4], reverse=True)
+                    score -= dist * 0.5
+                scored.append((cx, cy, area, moving, contour, score))
+            scored.sort(key=lambda c: c[5], reverse=True)
 
-            result = (enemy_candidates[0][0], enemy_candidates[0][1])
+            result = (scored[0][0], scored[0][1])
+            self._last_contour = scored[0][4]
 
         # Update lock to follow the detection
         if result is not None:
@@ -379,6 +378,187 @@ class EnemyDetector:
     def fg_mask(self):
         """Return the latest foreground mask (for debug overlay)."""
         return self._last_fg_mask
+
+
+# ---------------------------------------------------------------------------
+# Enemy orientation estimation (3-layer: velocity → shape → hold)
+# ---------------------------------------------------------------------------
+
+class EnemyOrientationEstimator:
+    """Estimates enemy heading from velocity and contour shape analysis.
+
+    Layer 1: Velocity heading (when speed > threshold)
+    Layer 2: minAreaRect + half-split disambiguation (when stationary)
+    Layer 3: Hold last known heading with decaying confidence
+    """
+
+    def __init__(self, velocity_threshold_cm_s: float = 5.0, ema_alpha: float = 0.3):
+        self._vel_threshold = velocity_threshold_cm_s
+        self._ema_alpha = ema_alpha
+        self._heading_rad: float | None = None  # current best estimate
+        self._confidence: float = 0.0           # 0=unknown, 1=high
+        self._method: str = "none"              # last method used
+        self._angular_vel_deg_s: float = 0.0    # for spin detection
+        self._prev_shape_angle: float | None = None
+        self._is_spinning: bool = False
+
+    def update(self, velocity_cm_s: tuple[float, float] | None,
+               contour: np.ndarray | None) -> None:
+        """Update heading estimate with new frame data.
+
+        Uses velocity heading when moving (reliable).
+        Holds last known heading when stationary (shape analysis is too noisy
+        at 50px blob size to determine front from back).
+        """
+
+        heading_candidate = None
+        method = "none"
+        conf = 0.0
+
+        # Velocity heading — only reliable signal at this resolution
+        if velocity_cm_s is not None:
+            vx, vy = velocity_cm_s
+            speed = math.hypot(vx, vy)
+            if speed > self._vel_threshold:
+                heading_candidate = math.atan2(vy, vx)
+                method = "velocity"
+                conf = min(1.0, speed / (self._vel_threshold * 3))
+
+        # Apply heading update or hold
+        if heading_candidate is not None:
+            if self._heading_rad is not None:
+                # EMA filter with angle wrapping
+                diff = self._angle_diff(heading_candidate, self._heading_rad)
+                self._heading_rad = self._heading_rad + self._ema_alpha * diff
+                self._heading_rad = math.atan2(
+                    math.sin(self._heading_rad), math.cos(self._heading_rad)
+                )
+            else:
+                self._heading_rad = heading_candidate
+            self._confidence = conf
+            self._method = method
+        else:
+            # Hold last heading, slow confidence decay
+            self._confidence = max(0.0, self._confidence - 0.005)
+            self._method = "hold" if self._heading_rad is not None else "none"
+
+        # Spin detection from shape angle changes
+        if contour is not None and len(contour) >= 5:
+            self._detect_spin(contour)
+
+    def _shape_heading(self, contour: np.ndarray) -> float | None:
+        """Estimate heading from minAreaRect + half-split disambiguation."""
+        rect = cv2.minAreaRect(contour)
+        (rcx, rcy), (w, h), angle_deg = rect
+
+        # Ensure angle represents the long axis (side-to-side for our robots)
+        if w < h:
+            angle_deg += 90.0
+        axis_rad = math.radians(angle_deg)
+
+        # Centroid from moments
+        M = cv2.moments(contour)
+        if M["m00"] < 1:
+            return None
+        cx = M["m10"] / M["m00"]
+        cy = M["m01"] / M["m00"]
+
+        # Principal axis direction (perpendicular to long axis = front-back axis)
+        # Long axis = side-to-side, so front-back is perpendicular
+        front_back_rad = axis_rad + math.pi / 2
+        fb_dx = math.cos(front_back_rad)
+        fb_dy = math.sin(front_back_rad)
+
+        # Half-split: project contour points onto front-back axis
+        pts = contour.reshape(-1, 2).astype(np.float64)
+        centered = pts - np.array([rcx, rcy])
+        projections = centered[:, 0] * fb_dx + centered[:, 1] * fb_dy
+
+        n_pos = np.sum(projections > 0)
+        n_neg = np.sum(projections <= 0)
+
+        if min(n_pos, n_neg) < 3:
+            return None
+
+        ratio = max(n_pos, n_neg) / max(1, min(n_pos, n_neg))
+        if ratio < 1.1:
+            # Too symmetric — also check centroid offset
+            offset_x = cx - rcx
+            offset_y = cy - rcy
+            offset_proj = offset_x * fb_dx + offset_y * fb_dy
+            if abs(offset_proj) < 1.0:
+                return None  # truly symmetric, can't determine front
+
+            # Front is opposite the centroid shift (centroid is toward heavy/back end)
+            # Flip Y for pixel→world conversion
+            if offset_proj > 0:
+                return math.atan2(fb_dy, -fb_dx)
+            else:
+                return math.atan2(-fb_dy, fb_dx)
+
+        # Front = lighter half (fewer points = tapered wedge)
+        if n_pos < n_neg:
+            heading = math.atan2(fb_dy, fb_dx)
+        else:
+            heading = math.atan2(-fb_dy, -fb_dx)
+
+        # Validate with centroid offset if available
+        offset_x = cx - rcx
+        offset_y = cy - rcy
+        offset_proj = offset_x * fb_dx + offset_y * fb_dy
+        if abs(offset_proj) > 1.5:
+            # Centroid offset disagrees — front is away from centroid
+            centroid_heading = math.atan2(-offset_y, -offset_x)
+            # Use centroid direction if it conflicts with half-split
+            dot = math.cos(heading) * math.cos(centroid_heading) + \
+                  math.sin(heading) * math.sin(centroid_heading)
+            if dot < 0:
+                heading += math.pi  # flip
+
+        # Flip Y axis: pixel coords have Y-down, world coords have Y-up
+        heading = math.atan2(-math.sin(heading), math.cos(heading))
+        return heading
+
+    def _detect_spin(self, contour: np.ndarray) -> None:
+        """Detect if enemy is spinning based on shape angle change rate."""
+        rect = cv2.minAreaRect(contour)
+        _, (w, h), angle_deg = rect
+        if w < h:
+            angle_deg += 90.0
+
+        if self._prev_shape_angle is not None:
+            diff = abs(angle_deg - self._prev_shape_angle)
+            if diff > 90:
+                diff = 180 - diff  # handle wrap
+            # At 60fps, >20 deg/frame = 1200 deg/s = spinning
+            self._is_spinning = diff > 20
+            self._angular_vel_deg_s = diff * 60  # rough estimate
+        self._prev_shape_angle = angle_deg
+
+    @staticmethod
+    def _angle_diff(a: float, b: float) -> float:
+        """Shortest signed angle from b to a."""
+        d = a - b
+        return (d + math.pi) % (2.0 * math.pi) - math.pi
+
+    @property
+    def heading_rad(self) -> float | None:
+        """Current heading estimate in radians, or None if unknown."""
+        if self._confidence < 0.1:
+            return None
+        return self._heading_rad
+
+    @property
+    def confidence(self) -> float:
+        return self._confidence
+
+    @property
+    def method(self) -> str:
+        return self._method
+
+    @property
+    def is_spinning(self) -> bool:
+        return self._is_spinning
 
 
 # ---------------------------------------------------------------------------
@@ -401,6 +581,7 @@ class EnemyTracker:
         self.detector = EnemyDetector()
         self.kalman = EnemyKalmanFilter(dt=dt, sigma_a=sigma_a,
                                          sigma_meas=sigma_meas_cm / 100.0)
+        self.orientation = EnemyOrientationEstimator()
         self._last_detection_px = None
         self._last_detection_cm = None
 
@@ -448,6 +629,11 @@ class EnemyTracker:
         self.kalman.predict()
         self.kalman.update(det_cm)
 
+        # Orientation estimation (velocity + shape)
+        vel = self.velocity_cm_s if self.kalman._initialized else None
+        contour = self.detector._last_contour
+        self.orientation.update(vel, contour)
+
     @property
     def is_tracking(self) -> bool:
         return self.kalman.is_tracking
@@ -476,6 +662,26 @@ class EnemyTracker:
     @property
     def speed_cm_s(self) -> float:
         return self.kalman.speed * 100.0
+
+    @property
+    def heading_rad(self) -> float | None:
+        """Estimated enemy heading in radians, or None if unknown."""
+        return self.orientation.heading_rad
+
+    @property
+    def heading_confidence(self) -> float:
+        """Heading confidence 0-1."""
+        return self.orientation.confidence
+
+    @property
+    def heading_method(self) -> str:
+        """How heading was determined: 'velocity', 'shape', 'hold', 'none'."""
+        return self.orientation.method
+
+    @property
+    def is_spinning(self) -> bool:
+        """True if enemy appears to be spinning in place."""
+        return self.orientation.is_spinning
 
     @property
     def position_m(self):
@@ -542,6 +748,24 @@ class EnemyTracker:
                         pass
             except (ValueError, cv2.error):
                 pass
+
+        # Heading arrow (green = velocity, cyan = shape, gray = hold)
+        if self.heading_rad is not None and self._last_detection_px is not None:
+            cx, cy = int(self._last_detection_px[0]), int(self._last_detection_px[1])
+            h_rad = self.heading_rad
+            arrow_len = 50
+            hx = cx + int(arrow_len * math.cos(h_rad))
+            hy = cy - int(arrow_len * math.sin(h_rad))  # negate Y for screen coords
+            method = self.heading_method
+            h_color = (0, 255, 0) if method == "velocity" else \
+                      (255, 255, 0) if method == "shape" else (150, 150, 150)
+            cv2.arrowedLine(frame, (cx, cy), (hx, hy), h_color, 2, tipLength=0.3)
+            cv2.putText(frame, f"H:{method[:3]} {math.degrees(h_rad):.0f}°",
+                        (cx + 45, cy + 15),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.35, h_color, 1)
+            if self.is_spinning:
+                cv2.putText(frame, "SPIN", (cx + 45, cy + 30),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 0, 255), 1)
 
         # Show track lock position (small green dot)
         lock = self.detector._track_lock_px

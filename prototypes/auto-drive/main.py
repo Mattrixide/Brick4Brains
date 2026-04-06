@@ -874,7 +874,7 @@ class AutoDriveApp:
                     else:
                         # Build context from current sensor data
                         enemy_pos = None
-                        enemy_heading = None
+                        enemy_heading = self._enemy_tracker.heading_rad  # from orientation estimator
                         enemy_vel = None
                         e_detected = self._enemy_tracker.enemy_detected
                         e_tracking = self._enemy_tracker.is_tracking

@@ -21,6 +21,8 @@ MAX_INT16 = 32767
 # Command modes
 MODE_DIRECT = 0
 MODE_GYRO_TURN = 1
+MODE_HEADING = 3
+MODE_CV_UPDATE = 4
 
 
 class RobotComms:
@@ -113,6 +115,77 @@ class RobotComms:
         if self._dry_run:
             print(f"[comms] dry-run  TURN delta={heading_delta_deg:+.1f}°")
             self.packets_sent += 1
+            return
+
+        try:
+            self._sock.sendto(packet, self._addr)
+        except OSError:
+            pass
+        self.packets_sent += 1
+
+    def send_heading(self, target_heading_deg, speed_norm, buttons=0, max_turn_rate=0):
+        """Send heading hold command (Mode 3).
+
+        ESP32 maintains target heading using onboard PID at 3.33kHz.
+
+        Args:
+            target_heading_deg: target heading in degrees
+            speed_norm: float -1.0 to 1.0 (forward speed)
+            buttons: uint8 button bitmask
+            max_turn_rate: max turn rate deg/s (0=unlimited)
+        """
+        speed_norm = max(-1.0, min(1.0, speed_norm))
+        speed_raw = int(speed_norm * MAX_INT16)
+        heading_cdeg = int(target_heading_deg * 100)
+        heading_cdeg = max(-32767, min(32767, heading_cdeg))
+        max_rate = max(0, min(32767, int(max_turn_rate)))
+
+        # 12 bytes: speed(i16) + reserved(i16) + buttons(u8) + mode(u8) + heading(i16) + max_rate(i16) + flags(i16)
+        packet = struct.pack(">hhBBhhh",
+                             speed_raw,       # bytes 0-1: speed
+                             0,               # bytes 2-3: reserved
+                             buttons & 0xFF,  # byte 4: buttons
+                             MODE_HEADING,    # byte 5: mode = 3
+                             heading_cdeg,    # bytes 6-7: target heading
+                             max_rate,        # bytes 8-9: max turn rate
+                             0)               # bytes 10-11: flags
+
+        if self._dry_run:
+            now = time.monotonic()
+            if now - self._last_log_time >= 0.25:
+                print(f"[comms] dry-run  HEADING target={target_heading_deg:+.1f}° speed={speed_norm:+.2f}")
+                self._last_log_time = now
+            self.packets_sent += 1
+            return
+
+        try:
+            self._sock.sendto(packet, self._addr)
+        except OSError:
+            pass
+        self.packets_sent += 1
+
+    def send_cv_correction(self, cv_heading_deg):
+        """Send CV heading correction to ESP32 (Mode 4).
+
+        Fused into ESP32's complementary filter for drift correction.
+
+        Args:
+            cv_heading_deg: absolute heading from ArUco in degrees
+        """
+        cv_cdeg = int(cv_heading_deg * 100)
+        cv_cdeg = max(-32767, min(32767, cv_cdeg))
+        ts = int(time.monotonic() * 1000) & 0xFFFF  # 16-bit wrapping timestamp
+
+        # 10 bytes: zeros(4) + buttons(u8=0) + mode(u8=4) + cv_heading(i16) + timestamp(u16)
+        packet = struct.pack(">hhBBhH",
+                             0,               # bytes 0-1: zero
+                             0,               # bytes 2-3: zero
+                             0,               # byte 4: buttons
+                             MODE_CV_UPDATE,  # byte 5: mode = 4
+                             cv_cdeg,         # bytes 6-7: CV heading
+                             ts)              # bytes 8-9: timestamp
+
+        if self._dry_run:
             return
 
         try:

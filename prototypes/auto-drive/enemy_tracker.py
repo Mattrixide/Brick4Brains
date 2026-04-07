@@ -368,7 +368,7 @@ class EnemyDetector:
             cv2.fillPoly(heal_mask, [self._robot_footprint], 0)  # exclude current robot pos
             if self._arena_pts is not None and self._arena_mask is not None:
                 heal_mask = cv2.bitwise_and(heal_mask, self._arena_mask)
-            alpha_heal = 0.02  # ~2s to fully heal at 60fps (0.98^120 ≈ 0.09)
+            alpha_heal = 0.05  # ~1s to fully heal at 60fps (0.95^60 ≈ 0.05)
             blended = cv2.addWeighted(
                 self._reference_gray, 1.0 - alpha_heal,
                 blurred, alpha_heal, 0

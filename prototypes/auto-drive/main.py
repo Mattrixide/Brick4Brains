@@ -131,6 +131,10 @@ class AutoDriveApp:
         self._verified = False
         self._ready_log_t = 0.0
 
+        # Frame logger (jsonl)
+        self._frame_log_file = None
+        self._frame_count = 0
+
         # Trail for dashboard visualization
         self.trail = deque(maxlen=200)
 
@@ -328,8 +332,10 @@ class AutoDriveApp:
         self._system_mode = SYSTEM_PREMATCH
         self._ready_log_t = 0.0
         self.comms.stop()
+
+
         print("[ready] READY — press B (Xbox) or Space to start battle")
-        self._say("Ready for battle.")
+        self._say("Ready.")
 
     def _start_battle(self):
         """Start battle mode from ready. Keep enemy tracking — don't reset it."""
@@ -1144,13 +1150,21 @@ class AutoDriveApp:
             elif self.mode == MODE_READY:
                 # Standing by — show status, wait for battle start
                 now_t = time.perf_counter()
+
+                # Log enemy position every frame for debugging
+                e_tracking = self._enemy_tracker.is_tracking if hasattr(self._enemy_tracker, 'is_tracking') else False
+                if e_tracking and self._enemy_tracker.position_cm is not None:
+                    ep = self._enemy_tracker.position_cm
+                    if not hasattr(self, '_ready_enemy_log_t') or now_t - self._ready_enemy_log_t > 0.1:
+                        self._ready_enemy_log_t = now_t
+                        print(f"[ready] enemy=({ep[0]:+.1f},{ep[1]:+.1f})")
+
                 if now_t - self._ready_log_t > 1.0:
                     self._ready_log_t = now_t
                     esp_ok = self.comms.connected and not self.comms._dry_run
                     imu_ok = self._telemetry.is_active
                     cam_ok = self._loop_fps > 30
                     aruco_ok = detected
-                    e_tracking = self._enemy_tracker.is_tracking if hasattr(self._enemy_tracker, 'is_tracking') else False
                     print(f"[ready] STANDING BY — ESP:{'OK' if esp_ok else 'FAIL'}"
                           f" IMU:{'OK' if imu_ok else 'FAIL'}"
                           f" CAM:{'OK' if cam_ok else 'FAIL'}"
@@ -1244,6 +1258,42 @@ class AutoDriveApp:
                     print(f"[cmd] thr={throttle:.2f} str={steering:.2f} pos=({x_cm:.0f},{y_cm:.0f}){aruco_info}{accel_info}{state_info}")
             if not getattr(self, '_rate_mode_active', False):
                 self.comms.send(throttle, steering, buttons)
+
+            # 7b. Frame logging (READY + BATTLE modes)
+            if self.mode in (MODE_READY, MODE_BATTLE):
+                if self._frame_log_file is None:
+                    log_path = os.path.join(
+                        os.path.dirname(os.path.abspath(__file__)), "logs",
+                        f"frames_{time.strftime('%Y%m%d_%H%M%S')}.jsonl"
+                    )
+                    os.makedirs(os.path.dirname(log_path), exist_ok=True)
+                    self._frame_log_file = open(log_path, "w")
+                    print(f"[log] Frame log: {log_path}")
+
+                e_pos = self._enemy_tracker.position_cm if self._enemy_tracker.is_tracking else None
+                has_enemy = e_pos is not None and self._enemy_tracker.is_tracking
+                rec = {
+                    "f": self._frame_count,
+                    "t": round(now, 4),
+                    "mode": self.mode,
+                    "bs": self._battle_controller.state if self.mode == MODE_BATTLE else "ready",
+                    "ox": round(x_cm, 1), "oy": round(y_cm, 1),
+                    "oh": round(heading_rad, 3),
+                    "od": detected,
+                    "ex": round(float(e_pos[0]), 1) if has_enemy else None,
+                    "ey": round(float(e_pos[1]), 1) if has_enemy else None,
+                    "ed": self._enemy_tracker.enemy_detected,
+                    "et": self._enemy_tracker.is_tracking,
+                    "dist": round(math.hypot(float(e_pos[0]) - x_cm, float(e_pos[1]) - y_cm), 1) if has_enemy and detected else 999.0,
+                    "thr": round(throttle, 3), "str": round(steering, 3),
+                }
+                self._frame_log_file.write(json.dumps(rec, separators=(",", ":")) + "\n")
+                self._frame_count += 1
+            elif self._frame_log_file is not None:
+                self._frame_log_file.close()
+                print(f"[log] Frame log closed ({self._frame_count} frames)")
+                self._frame_log_file = None
+                self._frame_count = 0
 
             # 8. Update dashboard state
             self._update_shared_state(

@@ -714,6 +714,26 @@ class AutoDriveApp:
             if ' ' in keys:
                 if self.mode == MODE_READY:
                     self._start_battle()
+            if 'r' in keys:
+                frame = self.camera.read() if self.camera else None
+                if frame is not None:
+                    self._enemy_tracker.detector.capture_reference(frame)
+                    self._enemy_tracker.reset()
+                    ref_path = os.path.join(
+                        os.path.dirname(os.path.abspath(__file__)),
+                        "arena_reference.png"
+                    )
+                    ref_gray = self._enemy_tracker.detector._reference_gray
+                    if ref_gray is not None:
+                        cv2.imwrite(ref_path, ref_gray)
+                    # Also save color snapshot for replay
+                    snap_path = os.path.join(
+                        os.path.dirname(os.path.abspath(__file__)),
+                        "arena_snapshot.png"
+                    )
+                    cv2.imwrite(snap_path, frame)
+                    print(f"[main] Reference + snapshot saved")
+                    self._say("Reference captured.")
 
             # 3b. Xbox button edge detection (rising edge = press)
             btn_pressed = ctrl.buttons & ~self._prev_ctrl_buttons

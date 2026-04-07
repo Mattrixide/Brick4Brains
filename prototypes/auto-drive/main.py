@@ -50,6 +50,15 @@ from state_machine import BattleController, BattleContext
 from battle_config import BattleConfig
 from match_timer import MatchTimer, PinTimer
 
+# Voice system (optional — graceful fallback if not available)
+try:
+    import sys as _sys
+    _sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "robot-voice"))
+    from main import RobotAnnouncer
+    _HAS_VOICE = True
+except ImportError:
+    _HAS_VOICE = False
+
 
 # ---------------------------------------------------------------------------
 # Mode constants
@@ -63,6 +72,8 @@ MODE_INTERCEPT_CHARGE = "charging"  # actively pursuing enemy
 MODE_PIN = "pinning"               # pinning enemy to wall
 MODE_REVERSE = "reversing"         # backing away after pin
 MODE_BATTLE = "battle"             # HSM combat state machine
+MODE_READY = "ready"               # standing by, waiting for battle start
+MODE_VERIFY = "verify"             # running system verification
 
 # System mode lifecycle (overlays on top of robot mode)
 SYSTEM_CONFIG = "config"
@@ -98,6 +109,23 @@ class AutoDriveApp:
         self.running = True
         self._system_mode = SYSTEM_CONFIG
         self._flourish_timer = None  # for victory dance
+
+        # Voice system
+        if _HAS_VOICE:
+            try:
+                self._voice = RobotAnnouncer(mode='vocoder')
+                print("[voice] Brick's voice system online")
+            except Exception:
+                self._voice = None
+        else:
+            self._voice = None
+
+        # Xbox button edge detection
+        self._prev_ctrl_buttons = 0
+
+        # Verification state
+        self._verified = False
+        self._ready_log_t = 0.0
 
         # Trail for dashboard visualization
         self.trail = deque(maxlen=200)
@@ -191,6 +219,164 @@ class AutoDriveApp:
         )
         if not os.path.exists(self._charuco_path):
             self.tracker.generate_charuco_board(self._charuco_path)
+
+    def _say(self, text):
+        """Non-blocking voice announcement (no-op if voice unavailable)."""
+        if self._voice:
+            try:
+                self._voice.say(text)
+            except Exception:
+                pass
+
+    def _verify_show(self, lines):
+        """Show verification status on the OpenCV window."""
+        frame = self.camera.read() if self.camera else None
+        if frame is None:
+            frame = np.zeros((720, 1280, 3), dtype=np.uint8)
+        overlay = frame.copy()
+        # Dark background box
+        h, w = overlay.shape[:2]
+        cv2.rectangle(overlay, (w//4, h//6), (3*w//4, 5*h//6), (20, 20, 20), -1)
+        cv2.addWeighted(overlay, 0.85, frame, 0.15, 0, frame)
+        # Title
+        y = h//6 + 40
+        cv2.putText(frame, "SYSTEM VERIFICATION", (w//4 + 20, y),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 200, 255), 2)
+        y += 40
+        for line in lines:
+            color = (0, 255, 0) if "PASS" in line else (0, 0, 255) if "FAIL" in line else (200, 200, 200)
+            if "..." in line:
+                color = (255, 255, 100)
+            cv2.putText(frame, line, (w//4 + 20, y),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 1)
+            y += 30
+        if self.args.show_cv:
+            cv2.imshow("Auto-Drive", frame)
+            cv2.waitKey(1)
+
+    def _run_verification(self):
+        """Run 4-step system verification with visual feedback. Returns True if all pass."""
+        print("=" * 40)
+        print("  SYSTEM VERIFICATION")
+        print("=" * 40)
+        results = []
+        passed = 0
+
+        # 1. ESP32 connection
+        results.append("[1/4] ESP32 ... checking")
+        self._verify_show(results)
+        esp_ok = self.comms.connected and not self.comms._dry_run
+        results[-1] = f"[1/4] ESP32: {'PASS' if esp_ok else 'FAIL'}"
+        self._verify_show(results)
+        print(f"  {results[-1]}")
+        passed += esp_ok
+
+        # 2. Motor test
+        results.append("[2/4] Motors ... checking")
+        self._verify_show(results)
+        if esp_ok:
+            results[-1] = "[2/4] Motors ... forward pulse"
+            self._verify_show(results)
+            for _ in range(15):
+                self.comms.send(0.3, 0.0)
+                time.sleep(0.02)
+            results[-1] = "[2/4] Motors ... reverse pulse"
+            self._verify_show(results)
+            for _ in range(15):
+                self.comms.send(-0.3, 0.0)
+                time.sleep(0.02)
+            self.comms.stop()
+            results[-1] = "[2/4] Motors: PASS"
+            passed += 1
+        else:
+            results[-1] = "[2/4] Motors: FAIL (no ESP32)"
+        self._verify_show(results)
+        print(f"  {results[-1]}")
+
+        # 3. IMU — send packets to wake up telemetry
+        results.append("[3/4] IMU ... checking")
+        self._verify_show(results)
+        for _ in range(10):
+            self.comms.send(0.0, 0.0, 0)
+            time.sleep(0.02)
+        time.sleep(0.3)
+        imu_ok = self._telemetry.is_active
+        results[-1] = f"[3/4] IMU: {'PASS' if imu_ok else 'FAIL'}"
+        self._verify_show(results)
+        print(f"  {results[-1]}")
+        passed += imu_ok
+
+        # 4. Camera
+        results.append("[4/4] Camera ... checking")
+        self._verify_show(results)
+        frame = self.camera.read() if self.camera else None
+        cam_ok = frame is not None
+        results[-1] = f"[4/4] Camera: {'PASS' if cam_ok else 'FAIL'}"
+        self._verify_show(results)
+        print(f"  {results[-1]}")
+        passed += cam_ok
+
+        # Final result
+        results.append("")
+        if passed == 4:
+            results.append("VERIFIED - 4/4 checks passed")
+        else:
+            results.append(f"INCOMPLETE - {passed}/4 checks passed")
+        self._verify_show(results)
+        time.sleep(1.0)  # show result for 1 second
+
+        print("-" * 40)
+        print(f"  {'VERIFIED' if passed == 4 else 'INCOMPLETE'} — {passed}/4 checks passed")
+        print("=" * 40)
+
+        self._verified = passed == 4
+        if self._verified:
+            self._say("Systems verified. Ready for battle.")
+        else:
+            failed = 4 - passed
+            self._say(f"Verification incomplete. {failed} checks failed.")
+
+        # Drain queued keypresses — check for quit
+        for _ in range(100):
+            k = cv2.waitKey(1) & 0xFF
+            if k == ord("q"):
+                self.running = False
+                return self._verified
+
+        return self._verified
+
+    def _emergency_stop(self):
+        """Halt all systems immediately."""
+        self.comms.stop()
+        self.mode = MODE_IDLE
+        self._system_mode = SYSTEM_CONFIG
+        self._match_timer.reset()
+        self._battle_controller.reset()
+        self._flourish_timer = None
+        self._say("Emergency stop")
+        print("[EMERGENCY STOP] All systems halted")
+
+    def _enter_ready(self):
+        """Enter ready/standing-by mode."""
+        self.mode = MODE_READY
+        self._system_mode = SYSTEM_PREMATCH
+        self._ready_log_t = 0.0
+        self.comms.stop()
+        print("[ready] READY — press B (Xbox) or Space to start battle")
+        self._say("Ready for battle.")
+
+    def _start_battle(self):
+        """Start battle mode from ready."""
+        self._system_mode = SYSTEM_BATTLE
+        self._battle_controller.reset()
+        self._match_timer.reset()
+        self._match_timer.start()
+        self._pin_timer.reset()
+        self._flourish_timer = None
+        self._enemy_tracker.reset()
+        self.mode = MODE_BATTLE
+        print("[battle] FIGHT! Match started!")
+        self._say("Fight!")
 
     def start(self):
         """Initialize all components and run the main loop."""
@@ -464,7 +650,12 @@ class AutoDriveApp:
                 self._heading_fusion.update_gyro(tel["gyro_z"], dt)
 
             # 2. Convert to world coordinates + EMA filter
-            x_cm, y_cm, heading_rad = 0.0, 0.0, 0.0
+            # When ArUco lost, use IMU-fused heading instead of defaulting to 0
+            if self._heading_fusion.is_calibrated:
+                heading_rad = self._heading_fusion.heading_rad
+            else:
+                heading_rad = 0.0
+            x_cm, y_cm = 0.0, 0.0
             detected = False
             if pose is not None:
                 detected = True
@@ -496,6 +687,11 @@ class AutoDriveApp:
                         math.cos(raw_heading - self._filtered_heading),
                     )
                     self._filtered_heading += a * hdiff
+                    # Wrap to [-pi, pi] to prevent unbounded drift
+                    self._filtered_heading = math.atan2(
+                        math.sin(self._filtered_heading),
+                        math.cos(self._filtered_heading),
+                    )
 
                 x_cm = self._filtered_x
                 y_cm = self._filtered_y
@@ -526,6 +722,32 @@ class AutoDriveApp:
 
             # 3. Read controller
             ctrl = self.controller.read()
+
+            # 3b. Xbox button edge detection (rising edge = press)
+            btn_pressed = ctrl.buttons & ~self._prev_ctrl_buttons
+            self._prev_ctrl_buttons = ctrl.buttons
+            BTN_B = 0x02       # bit 1
+            BTN_BACK = 0x40    # bit 6
+            BTN_START = 0x80   # bit 7
+
+            # Back button → emergency stop from any mode
+            if btn_pressed & BTN_BACK:
+                self._emergency_stop()
+
+            # Start button
+            elif btn_pressed & BTN_START:
+                if self.mode == MODE_IDLE:
+                    # Run verification and enter ready mode
+                    if self._run_verification():
+                        self._enter_ready()
+                elif self.mode in (MODE_BATTLE, MODE_READY):
+                    # Exit battle/ready → idle
+                    self._emergency_stop()
+
+            # B button → start battle from ready
+            elif btn_pressed & BTN_B:
+                if self.mode == MODE_READY:
+                    self._start_battle()
 
             # 4. Process dashboard commands
             self._process_dashboard_commands()
@@ -918,9 +1140,46 @@ class AutoDriveApp:
                             throttle_cmd=throttle,
                         )
                         output = self._battle_controller.tick(ctx)
-                        throttle = output.throttle
-                        steering = output.steering
-                        buttons = output.buttons
+                        if output.target_omega_dps is not None:
+                            # Rate mode: ESP32 holds angular velocity at 3.33kHz
+                            self.comms.send_rate(
+                                output.target_omega_dps,
+                                output.target_speed,
+                                output.buttons,
+                            )
+                            throttle = 0.0
+                            steering = 0.0
+                            buttons = output.buttons
+                            self._rate_mode_active = True
+                        else:
+                            # Legacy direct mode
+                            throttle = output.throttle
+                            steering = output.steering
+                            buttons = output.buttons
+                            self._rate_mode_active = False
+
+            elif self.mode == MODE_READY:
+                # Standing by — show status, wait for battle start
+                now_t = time.perf_counter()
+                if now_t - self._ready_log_t > 1.0:
+                    self._ready_log_t = now_t
+                    esp_ok = self.comms.connected and not self.comms._dry_run
+                    imu_ok = self._telemetry.is_active
+                    cam_ok = self._loop_fps > 30
+                    aruco_ok = detected
+                    e_tracking = self._enemy_tracker.is_tracking if hasattr(self._enemy_tracker, 'is_tracking') else False
+                    print(f"[ready] STANDING BY — ESP:{'OK' if esp_ok else 'FAIL'}"
+                          f" IMU:{'OK' if imu_ok else 'FAIL'}"
+                          f" CAM:{'OK' if cam_ok else 'FAIL'}"
+                          f" ArUco:{'OK' if aruco_ok else 'FAIL'}"
+                          f" Enemy:{'TRACKED' if e_tracking else 'NO'}")
+
+                # Stick override → manual
+                if abs(ctrl.throttle) > 0.25 or abs(ctrl.steering) > 0.25:
+                    print("[main] Stick override — switching to MANUAL")
+                    self.mode = MODE_MANUAL
+                    throttle = ctrl.throttle
+                    steering = ctrl.steering
 
             elif self.mode == MODE_IDLE:
                 # Check for controller override — require deliberate input
@@ -975,7 +1234,8 @@ class AutoDriveApp:
                     steering = min_steering if steering > 0 else -min_steering
 
             # 6b. Heading-hold micro-corrections (IMU-based)
-            if self.mode in (MODE_AUTO, MODE_INTERCEPT_CHARGE, MODE_BATTLE):
+            # NOT in MODE_BATTLE — the state machine has its own steering controller
+            if self.mode in (MODE_AUTO, MODE_INTERCEPT_CHARGE):
                 steering = self._heading_hold_correction(throttle, steering, dt)
 
             # 6c. ESC dead zone boost for battle mode
@@ -999,7 +1259,8 @@ class AutoDriveApp:
                         amag = math.hypot(tel.get("accel_x", 0), tel.get("accel_y", 0))
                         accel_info = f" accel={amag:.0f}mg"
                     print(f"[cmd] thr={throttle:.2f} str={steering:.2f} pos=({x_cm:.0f},{y_cm:.0f}){aruco_info}{accel_info}{state_info}")
-            self.comms.send(throttle, steering, buttons)
+            if not getattr(self, '_rate_mode_active', False):
+                self.comms.send(throttle, steering, buttons)
 
             # 8. Update dashboard state
             self._update_shared_state(
@@ -1262,26 +1523,22 @@ class AutoDriveApp:
                                 self._pursuit_fsm.reset()
                                 self._enemy_tracker.reset()
                                 print("[main] Intercept TRACKING — press SPACE to charge")
+                        elif key == ord("v"):
+                            # Run system verification → enter ready mode
+                            # Cooldown prevents re-trigger from queued keypresses
+                            if time.perf_counter() - getattr(self, '_last_verify_t', 0) > 3.0:
+                                self._last_verify_t = time.perf_counter()
+                                if self._run_verification():
+                                    self._enter_ready()
                         elif key == ord("b"):
                             # Toggle battle mode
                             if self.mode == MODE_BATTLE:
-                                self.mode = MODE_IDLE
-                                self._system_mode = SYSTEM_CONFIG
-                                self._match_timer.reset()
-                                self._battle_controller.reset()
-                                self._flourish_timer = None
-                                self.comms.stop()
-                                print("[main] Battle mode OFF")
+                                self._emergency_stop()
+                            elif self.mode == MODE_READY:
+                                self._start_battle()
                             else:
-                                self._system_mode = SYSTEM_BATTLE
-                                self._battle_controller.reset()
-                                self._match_timer.reset()
-                                self._match_timer.start()
-                                self._pin_timer.reset()
-                                self._flourish_timer = None
-                                self._enemy_tracker.reset()
-                                self.mode = MODE_BATTLE
-                                print("[main] BATTLE MODE ON — match started!")
+                                # Direct battle start (skip verification)
+                                self._start_battle()
                         elif key == ord("t"):
                             # Pit calibration — mark 2 opposite corners
                             if self._pit_calibrating:
@@ -1295,8 +1552,10 @@ class AutoDriveApp:
                                 self._pit_corner1_cm = None
                                 print("[pit-cal] Click two OPPOSITE corners of the pit on the camera view")
                         elif key == ord(" "):
-                            # SPACE — trigger charge from tracking mode
-                            if self.mode == MODE_INTERCEPT and self._enemy_tracker.is_tracking:
+                            # SPACE — start battle from ready, or trigger charge
+                            if self.mode == MODE_READY:
+                                self._start_battle()
+                            elif self.mode == MODE_INTERCEPT and self._enemy_tracker.is_tracking:
                                 self.mode = MODE_INTERCEPT_CHARGE
                                 self._pursuit_fsm.reset()
                                 # Skip ACQUIRE — enemy already tracked, go straight to INTERCEPT
@@ -1821,6 +2080,8 @@ class AutoDriveApp:
             self.camera.stop()
         print("[main] Closing controller ...")
         self.controller.close()
+        if self._voice:
+            self._voice.shutdown()
         if self.args.show_cv:
             cv2.destroyAllWindows()
         print("[main] Done.")

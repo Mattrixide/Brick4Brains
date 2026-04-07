@@ -49,6 +49,9 @@ class BattleOutput:
     throttle: float = 0.0
     steering: float = 0.0
     buttons: int = 0
+    # Rate mode: when set, ESP32 holds this angular velocity at 3.33kHz
+    target_omega_dps: float | None = None  # None = legacy direct mode
+    target_speed: float = 0.0              # forward speed for rate mode
 
 
 # ---------------------------------------------------------------------------
@@ -406,31 +409,26 @@ class BattleController:
         )
         alpha = _angle_diff(desired_heading, ctx.our_heading_rad)
 
-        # Way off → spin to face (fast)
-        if abs(alpha) > 1.0:
-            self._prev_steer = 0.0
-            return BattleOutput(
-                throttle=0.0,
-                steering=1.0 if alpha > 0 else -1.0,
-            )
+        # Rate mode: compute desired angular velocity (frame-invariant)
+        # Kp_omega converts heading error (rad) to turn rate (dps)
+        Kp_omega = 120.0  # dps per radian — 1 rad error → 120 dps turn
+        omega = Kp_omega * alpha
+        omega = max(-300.0, min(300.0, omega))  # clamp to 300 dps
 
-        # Pure pursuit with slew rate limiting
-        lookahead = max(20.0, ctx.distance_cm * 0.5)
-        track_width = 15.0
-        turn_factor = track_width * math.sin(alpha) / lookahead
-        raw_steering = max(-0.5, min(0.5, turn_factor * 1.2))
+        # Speed: reduce proportionally to heading error
+        alpha_abs = abs(alpha)
+        if alpha_abs > 1.0:
+            # Way off → spin in place
+            speed = 0.0
+        elif alpha_abs < 0.18:
+            # <10 deg → full speed
+            speed = 1.0
+        else:
+            # Linear ramp
+            speed = max(0.25, 1.0 - (alpha_abs - 0.18) * 0.86)
+        speed *= (1.0 - min(abs(omega) / 300.0, 1.0) * 0.2)  # slow when turning hard
 
-        max_slew = 0.08
-        delta_s = raw_steering - self._prev_steer
-        delta_s = max(-max_slew, min(max_slew, delta_s))
-        steering = self._prev_steer + delta_s
-        self._prev_steer = steering
-
-        # Full speed pursuit — back off slightly when turning hard
-        base_throttle = 1.0 * (1.0 - abs(steering) * 0.2)
-        throttle = min(1.0, base_throttle)
-
-        return BattleOutput(throttle=throttle, steering=steering)
+        return BattleOutput(target_omega_dps=omega, target_speed=speed)
 
     def _action_charge_flank(self, ctx: BattleContext, now: float) -> BattleOutput:
         """Arc around to the enemy's safe side before committing."""
@@ -517,11 +515,12 @@ class BattleController:
         if ctx.enemy_tracking and ctx.enemy_pos is not None:
             ex, ey = ctx.enemy_pos
             at_wall = abs(ex) > self.cfg.wall_threshold_cm or abs(ey) > self.cfg.wall_threshold_cm
-            throttle = 0.2 if at_wall else 1.0
+            speed = 0.2 if at_wall else 1.0
         else:
-            throttle = 0.2
+            speed = 0.2
 
-        return BattleOutput(throttle=throttle, steering=0.0)
+        # Rate mode: omega=0 (drive straight, gyro resists impacts)
+        return BattleOutput(target_omega_dps=0.0, target_speed=speed)
 
     # -- Pit strategy actions -----------------------------------------------
 

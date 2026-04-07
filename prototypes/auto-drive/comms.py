@@ -22,6 +22,7 @@ MAX_INT16 = 32767
 MODE_DIRECT = 0
 MODE_GYRO_TURN = 1
 MODE_HEADING = 3
+MODE_RATE = 5
 
 
 class RobotComms:
@@ -153,6 +154,45 @@ class RobotComms:
             now = time.monotonic()
             if now - self._last_log_time >= 0.25:
                 print(f"[comms] dry-run  HEADING target={target_heading_deg:+.1f}° speed={speed_norm:+.2f}")
+                self._last_log_time = now
+            self.packets_sent += 1
+            return
+
+        try:
+            self._sock.sendto(packet, self._addr)
+        except OSError:
+            pass
+        self.packets_sent += 1
+
+    def send_rate(self, omega_dps, speed_norm, buttons=0):
+        """Send rate hold command (Mode 5).
+
+        ESP32 holds target angular velocity at 3.33kHz using gyro feedback.
+        Frame-invariant — no coordinate conversion needed.
+
+        Args:
+            omega_dps: target angular velocity in degrees/second (positive = CCW)
+            speed_norm: float -1.0 to 1.0 (forward speed)
+            buttons: uint8 button bitmask
+        """
+        speed_norm = max(-1.0, min(1.0, speed_norm))
+        speed_raw = int(speed_norm * MAX_INT16)
+        omega_cdps = int(omega_dps * 100)
+        omega_cdps = max(-32767, min(32767, omega_cdps))
+
+        packet = struct.pack(">hhBBhhh",
+                             speed_raw,       # bytes 0-1: speed
+                             0,               # bytes 2-3: reserved
+                             buttons & 0xFF,  # byte 4: buttons
+                             MODE_RATE,       # byte 5: mode = 5
+                             omega_cdps,      # bytes 6-7: target omega
+                             0,               # bytes 8-9: reserved
+                             0)               # bytes 10-11: reserved
+
+        if self._dry_run:
+            now = time.monotonic()
+            if now - self._last_log_time >= 0.25:
+                print(f"[comms] dry-run  RATE omega={omega_dps:+.1f}dps speed={speed_norm:+.2f}")
                 self._last_log_time = now
             self.packets_sent += 1
             return

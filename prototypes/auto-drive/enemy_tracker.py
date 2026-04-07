@@ -100,10 +100,26 @@ class EnemyKalmanFilter:
                     self.frames_without_detection = 0
                 return
 
+            # Reject physically impossible jumps (>100cm in one frame)
+            # A beetleweight cannot move 100cm in 16ms regardless of coast time
+            jump_cm = float(np.linalg.norm(y)) * 100.0  # m to cm
+            if jump_cm > 100.0:
+                # This is a target switch, not real movement — reject
+                self.frames_without_detection += 1
+                return
+
             K = self.P @ self.H.T @ np.linalg.inv(S)
 
             self.x = self.x + K @ y
             self.P = (np.eye(4) - K @ self.H) @ self.P
+
+            # Clamp velocity to physically possible range (500 cm/s = 5 m/s)
+            MAX_VEL = 5.0  # m/s
+            speed = math.sqrt(self.x[2]**2 + self.x[3]**2)
+            if speed > MAX_VEL:
+                scale = MAX_VEL / speed
+                self.x[2] *= scale
+                self.x[3] *= scale
 
             # Adaptive process noise (NIS check)
             if mahal_sq > 6.0:
@@ -151,8 +167,8 @@ ARUCO_EXCLUSION_RADIUS_PX = 80
 # Robot body dimensions relative to ArUco marker size (50mm marker)
 # From screenshot: robot body is roughly 2.5x marker width, 1.5x marker length
 # Plus small margin for position error
-ROBOT_WIDTH_MARKER_SCALE = 3.0   # side-to-side
-ROBOT_LENGTH_MARKER_SCALE = 2.0  # front-to-back
+ROBOT_WIDTH_MARKER_SCALE = 4.5   # side-to-side (increased to cover wheels/shadow)
+ROBOT_LENGTH_MARKER_SCALE = 3.5  # front-to-back (increased to cover weapon/wedge)
 
 
 def _compute_robot_footprint(aruco_corners):
@@ -328,15 +344,38 @@ class EnemyDetector:
 
         # Subtract our robot's footprint from foreground mask
         # This replaces the old per-contour ArUco exclusion and handles
-        # the blob-merge case when robots are in contact
-        self._robot_footprint = _compute_robot_footprint(our_robot_corners)
+        # the blob-merge case when robots are in contact.
+        # When ArUco is lost (corners=None), keep the last valid footprint
+        # to prevent the enemy tracker from locking onto our robot.
+        if our_robot_corners is not None:
+            new_fp = _compute_robot_footprint(our_robot_corners)
+            if new_fp is not None:
+                self._robot_footprint = new_fp
+            else:
+                # Fallback: simple circle exclusion
+                corners = our_robot_corners.reshape(-1, 2)
+                center = corners.mean(axis=0).astype(np.int32)
+                cv2.circle(fg_mask, tuple(center), ARUCO_EXCLUSION_RADIUS_PX, 0, -1)
+
+        # Apply footprint mask (current or stale from last detection)
         if self._robot_footprint is not None:
             cv2.fillPoly(fg_mask, [self._robot_footprint], 0)
-        elif our_robot_corners is not None:
-            # Fallback: simple circle exclusion if footprint computation fails
-            corners = our_robot_corners.reshape(-1, 2)
-            center = corners.mean(axis=0).astype(np.int32)
-            cv2.circle(fg_mask, tuple(center), ARUCO_EXCLUSION_RADIUS_PX, 0, -1)
+
+        # Progressive reference healing: slowly blend current frame into reference
+        # where our robot ISN'T. Ghost blobs at old positions fade in ~2 seconds.
+        if self._reference_gray is not None and self._robot_footprint is not None:
+            heal_mask = np.ones((h, w), dtype=np.uint8) * 255
+            cv2.fillPoly(heal_mask, [self._robot_footprint], 0)  # exclude current robot pos
+            if self._arena_pts is not None and self._arena_mask is not None:
+                heal_mask = cv2.bitwise_and(heal_mask, self._arena_mask)
+            alpha_heal = 0.02  # ~2s to fully heal at 60fps (0.98^120 ≈ 0.09)
+            blended = cv2.addWeighted(
+                self._reference_gray, 1.0 - alpha_heal,
+                blurred, alpha_heal, 0
+            )
+            self._reference_gray = np.where(
+                heal_mask > 0, blended, self._reference_gray
+            )
 
         self._last_fg_mask = fg_mask
 
@@ -389,6 +428,12 @@ class EnemyDetector:
 
         if enemy_candidates:
             scored = []
+            # Get our robot center for anti-self-detection
+            our_center = None
+            if self._robot_footprint is not None:
+                pts = self._robot_footprint.reshape(-1, 2).astype(np.float64)
+                our_center = pts.mean(axis=0)
+
             for cx, cy, area, moving, contour in enemy_candidates:
                 score = 0.0
                 score += 5000 if moving else 0
@@ -397,6 +442,11 @@ class EnemyDetector:
                     lx, ly = self._track_lock_px
                     dist = math.sqrt((cx-lx)**2 + (cy-ly)**2)
                     score -= dist * 0.5
+                # Penalize detections near our robot — likely self-detection leak
+                if our_center is not None:
+                    dist_to_us = math.sqrt((cx - our_center[0])**2 + (cy - our_center[1])**2)
+                    if dist_to_us < 150:  # within ~150px of our robot
+                        score -= 8000  # strong penalty, overrides area bonus
                 scored.append((cx, cy, area, moving, contour, score))
             scored.sort(key=lambda c: c[5], reverse=True)
 

@@ -262,6 +262,37 @@ class AutoDriveApp:
             cv2.imshow("Auto-Drive", frame)
             cv2.waitKey(1)
 
+    def _get_footprint_cm(self):
+        """Get robot footprint polygon in cm for replay logging."""
+        fp = self._enemy_tracker.detector._robot_footprint
+        if fp is None:
+            return None
+        try:
+            pts = fp.reshape(-1, 2)
+            return [
+                [round(c, 1) for c in self.tracker.px_to_cm(float(p[0]), float(p[1]))]
+                for p in pts
+            ]
+        except Exception:
+            return None
+
+    def _get_enemy_bbox_cm(self):
+        """Get enemy bounding box in cm for replay logging."""
+        contour = self._enemy_tracker.detector._last_contour
+        if contour is None:
+            return None
+        try:
+            rect = cv2.boundingRect(contour)
+            x, y, w, h = rect
+            corners_px = [(x, y), (x+w, y), (x+w, y+h), (x, y+h)]
+            corners_cm = [
+                [round(c, 1) for c in self.tracker.px_to_cm(float(px), float(py))]
+                for px, py in corners_px
+            ]
+            return corners_cm
+        except Exception:
+            return None
+
     def _run_verification(self):
         """Run system verification — fast, non-blocking. Returns True if all pass."""
         results = []
@@ -680,6 +711,16 @@ class AutoDriveApp:
                     vy = (y_cm - self._prev_pos[1]) / max(dt, 0.001)
                     self._our_velocity = (vx, vy)
                 self._prev_pos = (x_cm, y_cm)
+
+                # ArUco corners in cm (for replay logging)
+                try:
+                    corners_px = pose.corners.reshape(-1, 2)
+                    self._aruco_corners_cm = [
+                        list(self.tracker.px_to_cm(float(c[0]), float(c[1])))
+                        for c in corners_px
+                    ]
+                except Exception:
+                    self._aruco_corners_cm = None
 
             if pose is None and detected is False:
                 self._heading_fusion.update_no_cv()
@@ -1301,8 +1342,47 @@ class AutoDriveApp:
                     self._frame_log_file = open(log_path, "w")
                     print(f"[log] Frame log: {log_path}")
 
+                    # Save arena metadata for replay
+                    arena_meta_path = log_path.replace(".jsonl", "_arena.json")
+                    arena_meta = {
+                        "arena_width_cm": 244.0,
+                        "arena_height_cm": 244.0,
+                    }
+                    if hasattr(self.tracker, '_origin_x'):
+                        arena_meta["origin_x"] = float(self.tracker._origin_x)
+                        arena_meta["origin_y"] = float(self.tracker._origin_y)
+                    if hasattr(self.tracker, '_px_per_cm') and self.tracker._px_per_cm:
+                        arena_meta["px_per_cm"] = float(self.tracker._px_per_cm)
+                    if hasattr(self.tracker, '_homography') and self.tracker._homography is not None:
+                        arena_meta["homography"] = self.tracker._homography.tolist()
+                    if hasattr(self.tracker, '_homography_inv') and self.tracker._homography_inv is not None:
+                        arena_meta["inv_homography"] = self.tracker._homography_inv.tolist()
+                    frame_shape = frame.shape if frame is not None else (720, 1280)
+                    arena_meta["frame_w"] = int(frame_shape[1]) if len(frame_shape) > 1 else 1280
+                    arena_meta["frame_h"] = int(frame_shape[0])
+                    with open(arena_meta_path, "w") as amf:
+                        json.dump(arena_meta, amf, indent=2)
+                    print(f"[log] Arena meta: {arena_meta_path}")
+
                 e_pos = self._enemy_tracker.position_cm if self._enemy_tracker.is_tracking else None
                 has_enemy = e_pos is not None and self._enemy_tracker.is_tracking
+                # Our velocity
+                our_vel = getattr(self, '_our_velocity', (0.0, 0.0))
+                ovx = round(our_vel[0], 1) if our_vel else 0.0
+                ovy = round(our_vel[1], 1) if our_vel else 0.0
+                # Enemy velocity + heading
+                e_vel = self._enemy_tracker.velocity_cm_s if self._enemy_tracker.is_tracking else None
+                e_heading = self._enemy_tracker.heading_rad
+                # Match timer
+                mr = self._match_timer.remaining_s if hasattr(self, '_match_timer') and self._match_timer.is_running else None
+                urg = self._match_timer.urgency if hasattr(self, '_match_timer') and self._match_timer.is_running else None
+                # Accel
+                tel_ax, tel_ay = 0.0, 0.0
+                if self._telemetry.is_active:
+                    tel_data = self._telemetry.get()
+                    tel_ax = tel_data.get("accel_x", 0.0)
+                    tel_ay = tel_data.get("accel_y", 0.0)
+
                 rec = {
                     "f": self._frame_count,
                     "t": round(now, 4),
@@ -1311,13 +1391,31 @@ class AutoDriveApp:
                     "ox": round(x_cm, 1), "oy": round(y_cm, 1),
                     "oh": round(heading_rad, 3),
                     "od": detected,
+                    "ovx": ovx, "ovy": ovy,
                     "ex": round(float(e_pos[0]), 1) if has_enemy else None,
                     "ey": round(float(e_pos[1]), 1) if has_enemy else None,
+                    "eh": round(e_heading, 3) if e_heading is not None else None,
+                    "evx": round(float(e_vel[0]), 1) if e_vel is not None else None,
+                    "evy": round(float(e_vel[1]), 1) if e_vel is not None else None,
                     "ed": self._enemy_tracker.enemy_detected,
                     "et": self._enemy_tracker.is_tracking,
                     "dist": round(math.hypot(float(e_pos[0]) - x_cm, float(e_pos[1]) - y_cm), 1) if has_enemy and detected else 999.0,
                     "thr": round(throttle, 3), "str": round(steering, 3),
+                    "mr": round(mr, 1) if mr is not None else None,
+                    "urg": round(urg, 3) if urg is not None else None,
+                    "ax": round(tel_ax, 0), "ay": round(tel_ay, 0),
                     "rm": 1 if getattr(self, '_rate_mode_active', False) else 0,
+                    # Robot footprint polygon in cm (for replay visualization)
+                    "fp": self._get_footprint_cm(),
+                    # ArUco marker box corners in cm
+                    "ab": [[round(c[0], 1), round(c[1], 1)] for c in self._aruco_corners_cm] if hasattr(self, '_aruco_corners_cm') and self._aruco_corners_cm is not None else None,
+                    # Enemy bounding box (contour bounding rect in cm)
+                    "eb": self._get_enemy_bbox_cm() if has_enemy else None,
+                    # FPS
+                    "fps": round(1.0 / dt, 1) if dt > 0 else 60.0,
+                    # Enemy heading method + confidence
+                    "ehm": self._enemy_tracker.heading_method,
+                    "ehc": round(self._enemy_tracker.heading_confidence, 2),
                 }
                 self._frame_log_file.write(json.dumps(rec, separators=(",", ":")) + "\n")
                 self._frame_count += 1

@@ -1,0 +1,1147 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>B4B Match Replay</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    background: #0a0a0a;
+    color: #e0e0e0;
+    font-family: 'Segoe UI', system-ui, sans-serif;
+    overflow: hidden;
+    height: 100vh;
+  }
+  #app { display: flex; height: 100vh; }
+
+  /* Left panel — arena canvas */
+  #arena-panel {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    min-width: 0;
+  }
+  #arena-header {
+    padding: 8px 16px;
+    background: #111;
+    border-bottom: 1px solid #222;
+    display: flex;
+    align-items: center;
+    gap: 16px;
+    flex-shrink: 0;
+  }
+  #arena-header h1 { font-size: 16px; font-weight: 600; color: #0f0; }
+  #file-info { font-size: 12px; color: #888; }
+  #arena-wrap {
+    flex: 1;
+    position: relative;
+    overflow: hidden;
+  }
+  canvas#arena {
+    position: absolute;
+    top: 50%;
+    left: 50%;
+    transform: translate(-50%, -50%);
+  }
+
+  /* Right panel — data */
+  #data-panel {
+    width: 320px;
+    background: #111;
+    border-left: 1px solid #222;
+    display: flex;
+    flex-direction: column;
+    flex-shrink: 0;
+    overflow-y: auto;
+  }
+  .panel-section {
+    padding: 12px 16px;
+    border-bottom: 1px solid #1a1a1a;
+  }
+  .panel-section h2 {
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 1px;
+    color: #666;
+    margin-bottom: 8px;
+  }
+  .data-row {
+    display: flex;
+    justify-content: space-between;
+    font-size: 13px;
+    padding: 2px 0;
+  }
+  .data-row .label { color: #888; }
+  .data-row .value { font-family: 'Consolas', monospace; }
+
+  /* State badge */
+  .state-badge {
+    display: inline-block;
+    padding: 2px 8px;
+    border-radius: 3px;
+    font-size: 12px;
+    font-weight: 600;
+    font-family: monospace;
+  }
+
+  /* Timeline / controls */
+  #controls {
+    background: #111;
+    border-top: 1px solid #222;
+    padding: 8px 16px;
+    flex-shrink: 0;
+  }
+  #timeline-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-bottom: 6px;
+  }
+  #timeline {
+    flex: 1;
+    height: 6px;
+    -webkit-appearance: none;
+    appearance: none;
+    background: #222;
+    border-radius: 3px;
+    cursor: pointer;
+  }
+  #timeline::-webkit-slider-thumb {
+    -webkit-appearance: none;
+    width: 14px; height: 14px;
+    background: #0f0;
+    border-radius: 50%;
+    cursor: grab;
+  }
+  #time-label { font-size: 12px; font-family: monospace; color: #aaa; min-width: 100px; text-align: right; }
+
+  #btn-row {
+    display: flex;
+    gap: 6px;
+    align-items: center;
+  }
+  .ctrl-btn {
+    background: #222;
+    border: 1px solid #333;
+    color: #ccc;
+    padding: 4px 12px;
+    border-radius: 4px;
+    cursor: pointer;
+    font-size: 13px;
+    font-family: monospace;
+  }
+  .ctrl-btn:hover { background: #333; }
+  .ctrl-btn.active { background: #0a3; color: #fff; border-color: #0c5; }
+  #speed-label { font-size: 12px; color: #888; margin-left: 8px; }
+
+  /* State timeline mini bar */
+  #state-bar-wrap {
+    margin-top: 4px;
+    height: 16px;
+    position: relative;
+    background: #1a1a1a;
+    border-radius: 3px;
+    overflow: hidden;
+  }
+  #state-bar-wrap canvas { width: 100%; height: 100%; display: block; }
+
+  /* Drop zone */
+  #drop-zone {
+    position: absolute;
+    inset: 0;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    background: rgba(0,0,0,0.85);
+    z-index: 100;
+    cursor: pointer;
+  }
+  #drop-zone.hidden { display: none; }
+  #drop-zone .icon { font-size: 48px; margin-bottom: 16px; }
+  #drop-zone .text { font-size: 18px; color: #888; }
+  #drop-zone .sub { font-size: 13px; color: #555; margin-top: 8px; }
+  #drop-zone input { display: none; }
+
+  /* State event list */
+  #event-list {
+    max-height: 200px;
+    overflow-y: auto;
+    font-size: 12px;
+    font-family: monospace;
+  }
+  .event-row {
+    padding: 2px 0;
+    cursor: pointer;
+    display: flex;
+    gap: 8px;
+  }
+  .event-row:hover { background: #1a1a1a; }
+  .event-row .ev-time { color: #666; min-width: 50px; }
+  .event-row .ev-state { }
+  .event-row.current { background: #0a2; }
+
+  /* Trail legend */
+  .legend-item {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    margin-right: 12px;
+    font-size: 12px;
+  }
+  .legend-dot {
+    width: 10px; height: 10px;
+    border-radius: 50%;
+    display: inline-block;
+  }
+
+  /* Checkbox toggles */
+  .toggle-row {
+    display: flex;
+    gap: 12px;
+    flex-wrap: wrap;
+  }
+  .toggle-row label {
+    font-size: 12px;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    gap: 4px;
+  }
+</style>
+</head>
+<body>
+<div id="app">
+  <div id="arena-panel">
+    <div id="arena-header">
+      <h1>B4B MATCH REPLAY</h1>
+      <span id="file-info">No file loaded</span>
+      <button class="ctrl-btn" id="btn-open" onclick="document.getElementById('file-input-header').click()">Open...</button>
+      <input type="file" id="file-input-header" accept=".jsonl,.json,.png" multiple style="display:none">
+    </div>
+    <div id="arena-wrap">
+      <div id="drop-zone">
+        <div class="icon">&#x1F4C2;</div>
+        <div class="text">Drop frame log files here</div>
+        <div class="sub">Drop .jsonl + _arena.png + _arena.json together, or click to browse</div>
+        <input type="file" id="file-input" accept=".jsonl,.json,.png" multiple>
+      </div>
+      <canvas id="arena"></canvas>
+    </div>
+    <div id="controls">
+      <div id="timeline-row">
+        <input type="range" id="timeline" min="0" max="0" value="0">
+        <span id="time-label">0:00.000 / 0:00</span>
+      </div>
+      <div id="btn-row">
+        <button class="ctrl-btn" id="btn-play">&#9654; Play</button>
+        <button class="ctrl-btn" id="btn-prev">&lt;</button>
+        <button class="ctrl-btn" id="btn-next">&gt;</button>
+        <button class="ctrl-btn" id="btn-speed">1x</button>
+        <span id="speed-label"></span>
+        <span style="flex:1"></span>
+        <div class="toggle-row">
+          <label><input type="checkbox" id="chk-arena" checked> Arena</label>
+          <label><input type="checkbox" id="chk-pit" checked> Pit</label>
+          <label><input type="checkbox" id="chk-footprint" checked> Footprint</label>
+          <label><input type="checkbox" id="chk-ebox" checked> Enemy Box</label>
+          <label><input type="checkbox" id="chk-trail" checked> Trail</label>
+          <label><input type="checkbox" id="chk-heading" checked> Heading</label>
+          <label><input type="checkbox" id="chk-velocity"> Velocity</label>
+          <label><input type="checkbox" id="chk-grid" checked> Grid</label>
+        </div>
+      </div>
+      <div id="state-bar-wrap"><canvas id="state-bar"></canvas></div>
+    </div>
+  </div>
+  <div id="data-panel">
+    <div class="panel-section">
+      <h2>Frame</h2>
+      <div class="data-row"><span class="label">Frame</span><span class="value" id="d-frame">--</span></div>
+      <div class="data-row"><span class="label">Time</span><span class="value" id="d-time">--</span></div>
+      <div class="data-row"><span class="label">FPS</span><span class="value" id="d-fps">--</span></div>
+      <div class="data-row"><span class="label">Mode</span><span class="value" id="d-mode">--</span></div>
+      <div class="data-row"><span class="label">Battle State</span><span class="value" id="d-battle-state">--</span></div>
+      <div class="data-row"><span class="label">Match</span><span class="value" id="d-match">--</span></div>
+      <div class="data-row"><span class="label">Urgency</span><span class="value" id="d-urgency">--</span></div>
+    </div>
+    <div class="panel-section">
+      <h2>Our Robot</h2>
+      <div class="data-row"><span class="label">Position</span><span class="value" id="d-our-pos">--</span></div>
+      <div class="data-row"><span class="label">Heading</span><span class="value" id="d-our-hdg">--</span></div>
+      <div class="data-row"><span class="label">Velocity</span><span class="value" id="d-our-vel">--</span></div>
+      <div class="data-row"><span class="label">Detected</span><span class="value" id="d-our-det">--</span></div>
+      <div class="data-row"><span class="label">Accel (mg)</span><span class="value" id="d-accel">--</span></div>
+    </div>
+    <div class="panel-section">
+      <h2>Enemy</h2>
+      <div class="data-row"><span class="label">Position</span><span class="value" id="d-enemy-pos">--</span></div>
+      <div class="data-row"><span class="label">Heading</span><span class="value" id="d-enemy-hdg">--</span></div>
+      <div class="data-row"><span class="label">Velocity</span><span class="value" id="d-enemy-vel">--</span></div>
+      <div class="data-row"><span class="label">Distance</span><span class="value" id="d-dist">--</span></div>
+      <div class="data-row"><span class="label">Detected</span><span class="value" id="d-enemy-det">--</span></div>
+      <div class="data-row"><span class="label">Tracking</span><span class="value" id="d-enemy-trk">--</span></div>
+      <div class="data-row"><span class="label">Hdg Method</span><span class="value" id="d-enemy-hm">--</span></div>
+      <div class="data-row"><span class="label">Hdg Confidence</span><span class="value" id="d-enemy-hc">--</span></div>
+    </div>
+    <div class="panel-section">
+      <h2>Motor Output</h2>
+      <div class="data-row"><span class="label">Throttle</span><span class="value" id="d-thr">--</span></div>
+      <div class="data-row"><span class="label">Steering</span><span class="value" id="d-str">--</span></div>
+      <div style="margin-top:6px;">
+        <canvas id="motor-bar" width="280" height="40"></canvas>
+      </div>
+    </div>
+    <div class="panel-section">
+      <h2>State Transitions</h2>
+      <div id="event-list"></div>
+    </div>
+  </div>
+</div>
+
+<script>
+// ======================================================================
+// State color palette
+// ======================================================================
+const STATE_COLORS = {
+  idle:             '#444444',
+  battle:           '#00ff64',
+  acquire:          '#00c8ff',
+  charge_pursue:    '#0064ff',
+  charge_flank:     '#0096ff',
+  charge_ram:       '#ff0000',
+  charge_pin:       '#00ffff',
+  pit_position:     '#00c864',
+  pit_push:         '#00ff00',
+  pit_commit:       '#00ff32',
+  pit_abort:        '#00c8c8',
+  evade_retreat:    '#ff00c8',
+  evade_reposition: '#c864ff',
+  unstick:          '#ffa500',
+  lost_target:      '#666666',
+};
+
+function stateColor(s) { return STATE_COLORS[s] || '#888'; }
+
+// ======================================================================
+// Data
+// ======================================================================
+let frames = [];
+let stateEvents = []; // [{frame, time, state}]
+let currentFrame = 0;
+let playing = false;
+let playSpeed = 1;
+let playRAF = null;
+let lastPlayTime = 0;
+let playTimeAccum = 0;
+
+// Arena image + metadata
+let arenaImage = null;    // HTMLImageElement
+let arenaMeta = null;     // {origin_x, origin_y, px_per_cm, homography, inv_homography, pit_*}
+
+
+// ======================================================================
+// DOM refs
+// ======================================================================
+const $ = id => document.getElementById(id);
+const canvas = $('arena');
+const ctx = canvas.getContext('2d');
+const stateBarCanvas = $('state-bar');
+const stateBarCtx = stateBarCanvas.getContext('2d');
+const motorCanvas = $('motor-bar');
+const motorCtx = motorCanvas.getContext('2d');
+const timeline = $('timeline');
+
+// ======================================================================
+// File loading
+// ======================================================================
+const dropZone = $('drop-zone');
+const fileInput = $('file-input');
+
+dropZone.addEventListener('click', () => fileInput.click());
+fileInput.addEventListener('change', e => { if (e.target.files.length) loadFiles(e.target.files); });
+$('file-input-header').addEventListener('change', e => {
+  if (e.target.files.length) { loadFiles(e.target.files); e.target.value = ''; }
+});
+dropZone.addEventListener('dragover', e => { e.preventDefault(); e.stopPropagation(); });
+dropZone.addEventListener('drop', e => {
+  e.preventDefault(); e.stopPropagation();
+  if (e.dataTransfer.files.length) loadFiles(e.dataTransfer.files);
+});
+
+function loadFiles(fileList) {
+  const files = Array.from(fileList);
+  let jsonlFile = null, metaFile = null, imageFile = null;
+
+  for (const f of files) {
+    if (f.name.endsWith('.jsonl')) jsonlFile = f;
+    else if (f.name.endsWith('_arena.json') || (f.name.endsWith('.json') && f.name.includes('arena'))) metaFile = f;
+    else if (f.name.endsWith('.png') || f.name.endsWith('.jpg')) imageFile = f;
+  }
+
+  if (!jsonlFile) {
+    // Maybe they dropped just the jsonl
+    jsonlFile = files.find(f => f.name.endsWith('.jsonl') || f.name.endsWith('.json'));
+  }
+  if (!jsonlFile) return;
+
+  const promises = [];
+
+  // Load frame data
+  promises.push(new Promise(resolve => {
+    const r = new FileReader();
+    r.onload = () => {
+      frames = r.result.trim().split('\n').map(line => JSON.parse(line));
+      resolve();
+    };
+    r.readAsText(jsonlFile);
+  }));
+
+  // Load arena metadata
+  if (metaFile) {
+    promises.push(new Promise(resolve => {
+      const r = new FileReader();
+      r.onload = () => {
+        try { arenaMeta = JSON.parse(r.result); } catch(e) { arenaMeta = null; }
+        resolve();
+      };
+      r.readAsText(metaFile);
+    }));
+  }
+
+  // Load arena image
+  if (imageFile) {
+    promises.push(new Promise(resolve => {
+      const r = new FileReader();
+      r.onload = () => {
+        const img = new Image();
+        img.onload = () => { arenaImage = img; resolve(); };
+        img.onerror = () => { arenaImage = null; resolve(); };
+        img.src = r.result;
+      };
+      r.readAsDataURL(imageFile);
+    }));
+  }
+
+  Promise.all(promises).then(() => {
+    if (frames.length === 0) return;
+    dropZone.classList.add('hidden');
+
+    let info = `${jsonlFile.name}  |  ${frames.length} frames  |  ${(frames[frames.length-1].t).toFixed(1)}s`;
+    if (arenaImage) info += '  |  arena loaded';
+    if (arenaMeta) info += '  |  pit mapped';
+    $('file-info').textContent = info;
+
+    // Build state event list
+    stateEvents = [];
+    let lastState = null;
+    for (let i = 0; i < frames.length; i++) {
+      const s = frames[i].bs || frames[i].mode;
+      if (s !== lastState) {
+        stateEvents.push({ frame: i, time: frames[i].t, state: s });
+        lastState = s;
+      }
+    }
+    buildEventList();
+    drawStateBar();
+
+    timeline.max = frames.length - 1;
+    currentFrame = 0;
+    // Let DOM lay out after hiding drop zone, then size + render
+    requestAnimationFrame(() => {
+      resizeCanvas();
+      renderFrame(0);
+      drawStateBar();
+    });
+  });
+}
+
+// ======================================================================
+// Arena rendering
+// ======================================================================
+const ARENA_W = 244; // cm
+const ARENA_H = 244;
+const PAD = 30; // cm padding around arena
+
+function resizeCanvas() {
+  const wrap = $('arena-wrap');
+  const aspect = (ARENA_W + PAD*2) / (ARENA_H + PAD*2);
+  let w = wrap.clientWidth;
+  let h = wrap.clientHeight;
+  if (w / h > aspect) { w = h * aspect; } else { h = w / aspect; }
+  canvas.width = Math.floor(w * devicePixelRatio);
+  canvas.height = Math.floor(h * devicePixelRatio);
+  canvas.style.width = Math.floor(w) + 'px';
+  canvas.style.height = Math.floor(h) + 'px';
+  ctx.setTransform(devicePixelRatio, 0, 0, devicePixelRatio, 0, 0);
+  // Also size state bar
+  stateBarCanvas.width = $('state-bar-wrap').clientWidth * devicePixelRatio;
+  stateBarCanvas.height = 16 * devicePixelRatio;
+  stateBarCanvas.style.width = $('state-bar-wrap').clientWidth + 'px';
+  stateBarCanvas.style.height = '16px';
+  stateBarCtx.setTransform(devicePixelRatio, 0, 0, devicePixelRatio, 0, 0);
+  if (frames.length) { renderFrame(currentFrame); drawStateBar(); }
+}
+window.addEventListener('resize', resizeCanvas);
+
+// World cm -> canvas px
+function w2c(x_cm, y_cm) {
+  const cw = canvas.width / devicePixelRatio;
+  const ch = canvas.height / devicePixelRatio;
+  const scale = Math.min(cw / (ARENA_W + PAD*2), ch / (ARENA_H + PAD*2));
+  const cx = cw / 2;
+  const cy = ch / 2;
+  return [cx + x_cm * scale, cy - y_cm * scale]; // y-up in world, y-down on canvas
+}
+
+function renderFrame(idx) {
+  if (idx < 0 || idx >= frames.length) return;
+  currentFrame = idx;
+  const f = frames[idx];
+  const cw = canvas.width / devicePixelRatio;
+  const ch = canvas.height / devicePixelRatio;
+
+  ctx.clearRect(0, 0, cw, ch);
+
+  // Arena camera image background
+  if ($('chk-arena').checked && arenaImage && arenaMeta) {
+    try { drawArenaImage(cw, ch); } catch(e) { console.warn('Arena draw error:', e); }
+  }
+
+  // Grid
+  if ($('chk-grid').checked) drawGrid(cw, ch);
+
+  // Pit overlay
+  if ($('chk-pit').checked && arenaMeta && (arenaMeta.pit_x_cm || arenaMeta.pit_y_cm)) drawPit();
+
+  // Arena border
+  const [ax1, ay1] = w2c(-ARENA_W/2, ARENA_H/2);
+  const [ax2, ay2] = w2c(ARENA_W/2, -ARENA_H/2);
+  ctx.strokeStyle = '#333';
+  ctx.lineWidth = 2;
+  ctx.strokeRect(ax1, ay1, ax2-ax1, ay2-ay1);
+  ctx.strokeStyle = '#222';
+  ctx.lineWidth = 1;
+  // Center cross
+  const [ox, oy] = w2c(0, 0);
+  ctx.beginPath(); ctx.moveTo(ox-8, oy); ctx.lineTo(ox+8, oy); ctx.stroke();
+  ctx.beginPath(); ctx.moveTo(ox, oy-8); ctx.lineTo(ox, oy+8); ctx.stroke();
+
+  // Trails
+  if ($('chk-trail').checked) {
+    // Trail window: show last 3 seconds of trail up to current frame
+    const trailStart = Math.max(0, findFrameAtTime(f.t - 3.0));
+    drawTrail(trailStart, idx, 'ox', 'oy', '#0f04', '#0f0');
+    drawTrail(trailStart, idx, 'ex', 'ey', '#f004', '#f00');
+  }
+
+  // Enemy
+  if (f.ex != null && f.ey != null) {
+    drawRobot(f.ex, f.ey, f.eh, f.evx||0, f.evy||0, '#f44', '#f88', f.ed);
+  }
+
+  // Our robot
+  drawRobot(f.ox, f.oy, f.oh, f.ovx||0, f.ovy||0, '#0f0', '#8f8', f.od);
+
+  // ArUco marker box (green)
+  if (f.ab) {
+    drawPolygon(f.ab, '#0f0', 2);
+  }
+
+  // Robot footprint mask (magenta polygon)
+  if ($('chk-footprint').checked && f.fp) {
+    drawPolygon(f.fp, '#f0f', 1.5);
+  }
+
+  // Enemy detection box (cyan)
+  if ($('chk-ebox').checked && f.eb) {
+    drawPolygon(f.eb, '#0ff', 1.5);
+  }
+
+  // Distance line
+  if (f.ex != null && f.dist < 900) {
+    const [rx, ry] = w2c(f.ox, f.oy);
+    const [ex, ey] = w2c(f.ex, f.ey);
+    ctx.setLineDash([4, 4]);
+    ctx.strokeStyle = '#fff3';
+    ctx.lineWidth = 1;
+    ctx.beginPath(); ctx.moveTo(rx, ry); ctx.lineTo(ex, ey); ctx.stroke();
+    ctx.setLineDash([]);
+    // Distance label at midpoint
+    const mx = (rx+ex)/2, my = (ry+ey)/2;
+    ctx.fillStyle = '#aaa';
+    ctx.font = '11px Consolas, monospace';
+    ctx.fillText(`${f.dist.toFixed(0)}cm`, mx+4, my-4);
+  }
+
+  // State badge on arena
+  const state = f.bs || f.mode;
+  const [sx, sy] = w2c(f.ox, f.oy);
+  ctx.fillStyle = stateColor(state);
+  ctx.font = 'bold 11px Consolas, monospace';
+  ctx.fillText(state.toUpperCase().replace(/_/g, ' '), sx + 14, sy - 14);
+
+  // Update data panel
+  updateDataPanel(f);
+  updateMotorBar(f);
+
+  // Timeline
+  timeline.value = idx;
+  const totalT = frames[frames.length-1].t;
+  const curT = f.t;
+  $('time-label').textContent = `${fmtTime(curT)} / ${fmtTime(totalT)}`;
+}
+
+function drawGrid(cw, ch) {
+  ctx.strokeStyle = '#181818';
+  ctx.lineWidth = 0.5;
+  for (let x = -120; x <= 120; x += 30) {
+    const [px1, py1] = w2c(x, -ARENA_H/2 - PAD);
+    const [px2, py2] = w2c(x, ARENA_H/2 + PAD);
+    ctx.beginPath(); ctx.moveTo(px1, py1); ctx.lineTo(px2, py2); ctx.stroke();
+  }
+  for (let y = -120; y <= 120; y += 30) {
+    const [px1, py1] = w2c(-ARENA_W/2 - PAD, y);
+    const [px2, py2] = w2c(ARENA_W/2 + PAD, y);
+    ctx.beginPath(); ctx.moveTo(px1, py1); ctx.lineTo(px2, py2); ctx.stroke();
+  }
+}
+
+function drawArenaImage(cw, ch) {
+  // Map the camera image onto the arena canvas.
+  // We sample a grid of world-space points, find their pixel coords in the image
+  // using the inverse homography, then draw the image warped to the canvas.
+  //
+  // Approach: draw the image with a perspective transform approximation.
+  // We map the 4 arena corners from world cm → image pixels → canvas pixels,
+  // then use canvas drawImage with a clip path for each triangle.
+
+  if (!arenaMeta) return;
+  const meta = arenaMeta;
+
+  // Use inv_homography to map world cm → image pixels
+  // H * [x_cm, y_cm, 1]^T = [u*w, v*w, w]^T  → u = u*w/w, v = v*w/w
+  function cmToImagePx(x_cm, y_cm) {
+    if (meta.inv_homography) {
+      const H = meta.inv_homography;
+      const w = H[2][0] * x_cm + H[2][1] * y_cm + H[2][2];
+      const u = (H[0][0] * x_cm + H[0][1] * y_cm + H[0][2]) / w;
+      const v = (H[1][0] * x_cm + H[1][1] * y_cm + H[1][2]) / w;
+      return [u, v];
+    }
+    // Fallback: simple scale
+    const u = meta.origin_x + x_cm * meta.px_per_cm;
+    const v = meta.origin_y + y_cm * meta.px_per_cm;
+    return [u, v];
+  }
+
+  // Draw the arena image by subdividing into a grid of quads and texturing each.
+  // This gives a reasonable perspective warp approximation.
+  const SUBDIV = 12;
+  const halfW = ARENA_W / 2;
+  const halfH = ARENA_H / 2;
+  const stepX = ARENA_W / SUBDIV;
+  const stepY = ARENA_H / SUBDIV;
+  const imgW = arenaImage.naturalWidth;
+  const imgH = arenaImage.naturalHeight;
+
+  ctx.save();
+  ctx.globalAlpha = 0.4;
+
+  for (let gy = 0; gy < SUBDIV; gy++) {
+    for (let gx = 0; gx < SUBDIV; gx++) {
+      // World corners of this cell
+      const x0 = -halfW + gx * stepX;
+      const y0 = halfH - gy * stepY;     // top-left in world (y-up)
+      const x1 = x0 + stepX;
+      const y1 = y0 - stepY;              // bottom-right in world
+
+      // Canvas coordinates
+      const [cx0, cy0] = w2c(x0, y0);
+      const [cx1, cy1] = w2c(x1, y0);
+      const [cx2, cy2] = w2c(x1, y1);
+      const [cx3, cy3] = w2c(x0, y1);
+
+      // Image pixel coordinates
+      const [u0, v0] = cmToImagePx(x0, y0);
+      const [u1, v1] = cmToImagePx(x1, y0);
+      const [u2, v2] = cmToImagePx(x1, y1);
+      const [u3, v3] = cmToImagePx(x0, y1);
+
+      // Draw two triangles per quad using affine texture mapping
+      drawTexturedTriangle(
+        cx0, cy0, cx1, cy1, cx2, cy2,
+        u0, v0, u1, v1, u2, v2, imgW, imgH
+      );
+      drawTexturedTriangle(
+        cx0, cy0, cx2, cy2, cx3, cy3,
+        u0, v0, u2, v2, u3, v3, imgW, imgH
+      );
+    }
+  }
+  ctx.globalAlpha = 1;
+  ctx.restore();
+}
+
+function drawTexturedTriangle(
+  x0, y0, x1, y1, x2, y2,  // canvas coords
+  u0, v0, u1, v1, u2, v2,  // image coords
+  imgW, imgH
+) {
+  // Affine texture mapping using canvas transforms
+  ctx.save();
+  ctx.beginPath();
+  ctx.moveTo(x0, y0);
+  ctx.lineTo(x1, y1);
+  ctx.lineTo(x2, y2);
+  ctx.closePath();
+  ctx.clip();
+
+  // Solve affine: [x] = [a c e] [u]
+  //               [y]   [b d f] [v]
+  //                              [1]
+  const denom = (u0*(v1 - v2) + u1*(v2 - v0) + u2*(v0 - v1));
+  if (Math.abs(denom) < 0.001) { ctx.restore(); return; }
+
+  const a = (x0*(v1-v2) + x1*(v2-v0) + x2*(v0-v1)) / denom;
+  const b = (y0*(v1-v2) + y1*(v2-v0) + y2*(v0-v1)) / denom;
+  const c = (x0*(u2-u1) + x1*(u0-u2) + x2*(u1-u0)) / denom;
+  const d = (y0*(u2-u1) + y1*(u0-u2) + y2*(u1-u0)) / denom;
+  const e = (x0*(u1*v2-u2*v1) + x1*(u2*v0-u0*v2) + x2*(u0*v1-u1*v0)) / denom;
+  const f = (y0*(u1*v2-u2*v1) + y1*(u2*v0-u0*v2) + y2*(u0*v1-u1*v0)) / denom;
+
+  // Check for degenerate transform
+  if (!isFinite(a) || !isFinite(b) || !isFinite(c) || !isFinite(d) || !isFinite(e) || !isFinite(f)) {
+    ctx.restore();
+    return;
+  }
+  const dpr = devicePixelRatio;
+  ctx.setTransform(a * dpr, b * dpr, c * dpr, d * dpr, e * dpr, f * dpr);
+  ctx.drawImage(arenaImage, 0, 0);
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  ctx.restore();
+}
+
+function drawPit() {
+  if (!arenaMeta) return;
+  const px = arenaMeta.pit_x_cm;
+  const py = arenaMeta.pit_y_cm;
+  const r = arenaMeta.pit_radius_cm;
+  if (!r) return;
+
+  // Draw pit square
+  const [x1, y1] = w2c(px - r, py + r);
+  const [x2, y2] = w2c(px + r, py - r);
+  ctx.strokeStyle = '#f00';
+  ctx.lineWidth = 2;
+  ctx.setLineDash([6, 4]);
+  ctx.strokeRect(x1, y1, x2 - x1, y2 - y1);
+  ctx.setLineDash([]);
+
+  // Danger radius
+  const dr = arenaMeta.pit_danger_radius_cm || r + 15;
+  const [dx1, dy1] = w2c(px - dr, py + dr);
+  const [dx2, dy2] = w2c(px + dr, py - dr);
+  ctx.strokeStyle = '#f004';
+  ctx.lineWidth = 1;
+  ctx.setLineDash([3, 3]);
+  ctx.strokeRect(dx1, dy1, dx2 - dx1, dy2 - dy1);
+  ctx.setLineDash([]);
+
+  // Label
+  const [cx, cy] = w2c(px, py);
+  ctx.fillStyle = '#f44';
+  ctx.font = 'bold 12px Consolas, monospace';
+  ctx.textAlign = 'center';
+  ctx.fillText('PIT', cx, cy + 4);
+  ctx.textAlign = 'start';
+}
+
+function drawPolygon(pts, color, lineWidth) {
+  if (!pts || pts.length < 2) return;
+  ctx.strokeStyle = color;
+  ctx.lineWidth = lineWidth || 1.5;
+  ctx.beginPath();
+  const [x0, y0] = w2c(pts[0][0], pts[0][1]);
+  ctx.moveTo(x0, y0);
+  for (let i = 1; i < pts.length; i++) {
+    const [x, y] = w2c(pts[i][0], pts[i][1]);
+    ctx.lineTo(x, y);
+  }
+  ctx.closePath();
+  ctx.stroke();
+}
+
+function drawTrail(startIdx, endIdx, xKey, yKey, fadeColor, solidColor) {
+  const len = endIdx - startIdx;
+  if (len < 2) return;
+  for (let i = startIdx + 1; i <= endIdx; i++) {
+    const f = frames[i];
+    const pf = frames[i-1];
+    if (f[xKey] == null || pf[xKey] == null) continue;
+    const alpha = 0.15 + 0.85 * ((i - startIdx) / len);
+    const [x1, y1] = w2c(pf[xKey], pf[yKey]);
+    const [x2, y2] = w2c(f[xKey], f[yKey]);
+    ctx.strokeStyle = solidColor;
+    ctx.globalAlpha = alpha;
+    ctx.lineWidth = 1.5;
+    ctx.beginPath(); ctx.moveTo(x1, y1); ctx.lineTo(x2, y2); ctx.stroke();
+  }
+  ctx.globalAlpha = 1;
+}
+
+function drawRobot(x, y, heading, vx, vy, color, lightColor, detected) {
+  const [cx, cy] = w2c(x, y);
+  const scale = getScale();
+  const r = 8;
+
+  // Body circle
+  ctx.beginPath();
+  ctx.arc(cx, cy, r, 0, Math.PI * 2);
+  ctx.fillStyle = detected ? color : '#555';
+  ctx.fill();
+  ctx.strokeStyle = detected ? lightColor : '#777';
+  ctx.lineWidth = 1.5;
+  ctx.stroke();
+
+  // Heading arrow
+  if ($('chk-heading').checked && heading != null) {
+    const hx = cx + Math.cos(-heading) * (r + 10); // negate because canvas y is flipped
+    const hy = cy + Math.sin(-heading) * (r + 10);
+    // Actually: heading is math convention (CCW from +x), canvas has y-down
+    // w2c flips y, so heading arrow direction:
+    const ax = cx + Math.cos(heading) * (r + 10) * 1; // in world frame
+    // We need to convert the heading direction to canvas direction
+    const hdx = Math.cos(heading);
+    const hdy = Math.sin(heading);
+    // In canvas: x stays, y flips
+    const cdx = hdx;
+    const cdy = -hdy;
+    const tipX = cx + cdx * (r + 12);
+    const tipY = cy + cdy * (r + 12);
+    ctx.strokeStyle = detected ? lightColor : '#666';
+    ctx.lineWidth = 2;
+    ctx.beginPath(); ctx.moveTo(cx, cy); ctx.lineTo(tipX, tipY); ctx.stroke();
+    // Arrowhead
+    const angle = Math.atan2(cdy, cdx);
+    ctx.beginPath();
+    ctx.moveTo(tipX, tipY);
+    ctx.lineTo(tipX - 5*Math.cos(angle - 0.5), tipY - 5*Math.sin(angle - 0.5));
+    ctx.lineTo(tipX - 5*Math.cos(angle + 0.5), tipY - 5*Math.sin(angle + 0.5));
+    ctx.closePath();
+    ctx.fillStyle = detected ? lightColor : '#666';
+    ctx.fill();
+  }
+
+  // Velocity vector
+  if ($('chk-velocity').checked && vx != null && vy != null) {
+    const speed = Math.hypot(vx, vy);
+    if (speed > 2) { // only show if moving
+      const vScale = 0.5 * scale; // scale velocity to pixels
+      const vex = cx + vx * vScale;
+      const vey = cy - vy * vScale; // y flip
+      ctx.strokeStyle = '#ff0';
+      ctx.lineWidth = 1;
+      ctx.setLineDash([2, 2]);
+      ctx.beginPath(); ctx.moveTo(cx, cy); ctx.lineTo(vex, vey); ctx.stroke();
+      ctx.setLineDash([]);
+    }
+  }
+}
+
+function getScale() {
+  const cw = canvas.width / devicePixelRatio;
+  return cw / (ARENA_W + PAD*2);
+}
+
+function findFrameAtTime(t) {
+  if (t <= 0) return 0;
+  // Binary search
+  let lo = 0, hi = frames.length - 1;
+  while (lo < hi) {
+    const mid = (lo + hi) >> 1;
+    if (frames[mid].t < t) lo = mid + 1; else hi = mid;
+  }
+  return lo;
+}
+
+// ======================================================================
+// State bar (mini timeline colored by state)
+// ======================================================================
+function drawStateBar() {
+  if (!frames.length) return;
+  const w = stateBarCanvas.width / devicePixelRatio;
+  const h = 16;
+  stateBarCtx.clearRect(0, 0, w, h);
+  const totalT = frames[frames.length-1].t;
+  if (totalT <= 0) return;
+
+  for (let i = 0; i < stateEvents.length; i++) {
+    const ev = stateEvents[i];
+    const nextT = (i + 1 < stateEvents.length) ? stateEvents[i+1].time : totalT;
+    const x1 = (ev.time / totalT) * w;
+    const x2 = (nextT / totalT) * w;
+    stateBarCtx.fillStyle = stateColor(ev.state);
+    stateBarCtx.fillRect(x1, 0, Math.max(1, x2 - x1), h);
+  }
+
+  // Playhead
+  const px = (frames[currentFrame].t / totalT) * w;
+  stateBarCtx.fillStyle = '#fff';
+  stateBarCtx.fillRect(px - 1, 0, 2, h);
+}
+
+// ======================================================================
+// Data panel
+// ======================================================================
+function updateDataPanel(f) {
+  $('d-frame').textContent = f.f;
+  $('d-time').textContent = fmtTime(f.t);
+  $('d-fps').textContent = f.fps != null ? f.fps : '--';
+  $('d-mode').textContent = f.mode;
+
+  const bs = f.bs || '--';
+  const el = $('d-battle-state');
+  el.innerHTML = f.bs
+    ? `<span class="state-badge" style="background:${stateColor(f.bs)}20;color:${stateColor(f.bs)}">${f.bs}</span>`
+    : '--';
+
+  $('d-match').textContent = f.mr != null ? `${f.mr.toFixed(1)}s` : '--';
+  $('d-urgency').textContent = f.urg != null ? `${(f.urg*100).toFixed(0)}%` : '--';
+
+  $('d-our-pos').textContent = `(${f.ox.toFixed(1)}, ${f.oy.toFixed(1)})`;
+  $('d-our-hdg').textContent = `${(f.oh * 180 / Math.PI).toFixed(1)}deg`;
+  $('d-our-vel').textContent = f.ovx != null ? `(${f.ovx.toFixed(1)}, ${f.ovy.toFixed(1)})` : '--';
+  $('d-our-det').textContent = f.od ? 'YES' : 'NO';
+  $('d-our-det').style.color = f.od ? '#0f0' : '#f44';
+  $('d-accel').textContent = f.ax != null ? `(${f.ax}, ${f.ay}) mag=${Math.hypot(f.ax,f.ay).toFixed(0)}` : '--';
+
+  $('d-enemy-pos').textContent = f.ex != null ? `(${f.ex.toFixed(1)}, ${f.ey.toFixed(1)})` : '--';
+  $('d-enemy-hdg').textContent = f.eh != null ? `${(f.eh * 180 / Math.PI).toFixed(1)}deg` : '--';
+  $('d-enemy-vel').textContent = f.evx != null ? `(${f.evx.toFixed(1)}, ${f.evy.toFixed(1)})` : '--';
+  $('d-dist').textContent = f.dist < 900 ? `${f.dist.toFixed(1)} cm` : '--';
+  $('d-enemy-det').textContent = f.ed ? 'YES' : 'NO';
+  $('d-enemy-det').style.color = f.ed ? '#0f0' : '#f44';
+  $('d-enemy-trk').textContent = f.et ? 'YES' : 'NO';
+  $('d-enemy-trk').style.color = f.et ? '#0f0' : '#f44';
+  const hmColors = { velocity: '#0f0', shape: '#ff0', hold: '#999', none: '#555' };
+  const hm = f.ehm || '--';
+  $('d-enemy-hm').textContent = hm;
+  $('d-enemy-hm').style.color = hmColors[hm] || '#888';
+  $('d-enemy-hc').textContent = f.ehc != null ? `${(f.ehc * 100).toFixed(0)}%` : '--';
+
+  $('d-thr').textContent = f.thr.toFixed(3);
+  $('d-str').textContent = f.str.toFixed(3);
+
+  // Highlight current state event
+  document.querySelectorAll('.event-row').forEach(r => r.classList.remove('current'));
+  for (let i = stateEvents.length - 1; i >= 0; i--) {
+    if (stateEvents[i].frame <= currentFrame) {
+      const evEl = document.querySelector(`.event-row[data-idx="${i}"]`);
+      if (evEl) { evEl.classList.add('current'); evEl.scrollIntoView({ block: 'nearest' }); }
+      break;
+    }
+  }
+}
+
+function updateMotorBar(f) {
+  const w = 280, h = 40;
+  motorCtx.clearRect(0, 0, w, h);
+  const mid = w / 2;
+
+  // Throttle bar (top half)
+  motorCtx.fillStyle = '#222';
+  motorCtx.fillRect(0, 0, w, 18);
+  const thrW = Math.abs(f.thr) * mid;
+  const thrX = f.thr >= 0 ? mid : mid - thrW;
+  motorCtx.fillStyle = f.thr >= 0 ? '#0a0' : '#a00';
+  motorCtx.fillRect(thrX, 1, thrW, 16);
+  motorCtx.fillStyle = '#888';
+  motorCtx.font = '10px Consolas';
+  motorCtx.fillText('THR', 2, 12);
+
+  // Steering bar (bottom half)
+  motorCtx.fillStyle = '#222';
+  motorCtx.fillRect(0, 20, w, 18);
+  const strW = Math.abs(f.str) * mid;
+  const strX = f.str >= 0 ? mid : mid - strW;
+  motorCtx.fillStyle = '#06a';
+  motorCtx.fillRect(strX, 21, strW, 16);
+  motorCtx.fillStyle = '#888';
+  motorCtx.fillText('STR', 2, 32);
+
+  // Center line
+  motorCtx.strokeStyle = '#555';
+  motorCtx.lineWidth = 1;
+  motorCtx.beginPath(); motorCtx.moveTo(mid, 0); motorCtx.lineTo(mid, h); motorCtx.stroke();
+}
+
+// ======================================================================
+// Event list
+// ======================================================================
+function buildEventList() {
+  const el = $('event-list');
+  el.innerHTML = '';
+  stateEvents.forEach((ev, i) => {
+    const row = document.createElement('div');
+    row.className = 'event-row';
+    row.dataset.idx = i;
+    row.innerHTML = `<span class="ev-time">${fmtTime(ev.time)}</span>`
+      + `<span class="ev-state"><span class="state-badge" style="background:${stateColor(ev.state)}30;color:${stateColor(ev.state)}">${ev.state}</span></span>`;
+    row.addEventListener('click', () => { stopPlay(); renderFrame(ev.frame); drawStateBar(); });
+    el.appendChild(row);
+  });
+}
+
+// ======================================================================
+// Playback controls
+// ======================================================================
+const SPEEDS = [0.1, 0.25, 0.5, 1, 2, 4, 8];
+let speedIdx = 3;
+
+$('btn-play').addEventListener('click', togglePlay);
+$('btn-prev').addEventListener('click', () => { stopPlay(); renderFrame(Math.max(0, currentFrame - 1)); drawStateBar(); });
+$('btn-next').addEventListener('click', () => { stopPlay(); renderFrame(Math.min(frames.length-1, currentFrame + 1)); drawStateBar(); });
+$('btn-speed').addEventListener('click', () => {
+  speedIdx = (speedIdx + 1) % SPEEDS.length;
+  playSpeed = SPEEDS[speedIdx];
+  $('btn-speed').textContent = playSpeed + 'x';
+});
+
+timeline.addEventListener('input', () => {
+  stopPlay();
+  renderFrame(parseInt(timeline.value));
+  drawStateBar();
+});
+
+// Keyboard shortcuts
+document.addEventListener('keydown', e => {
+  if (e.code === 'Space') { e.preventDefault(); togglePlay(); }
+  else if (e.code === 'ArrowLeft') { e.preventDefault(); stopPlay(); renderFrame(Math.max(0, currentFrame - 1)); drawStateBar(); }
+  else if (e.code === 'ArrowRight') { e.preventDefault(); stopPlay(); renderFrame(Math.min(frames.length-1, currentFrame + 1)); drawStateBar(); }
+  else if (e.code === 'ArrowUp') { e.preventDefault(); speedIdx = Math.min(SPEEDS.length-1, speedIdx+1); playSpeed = SPEEDS[speedIdx]; $('btn-speed').textContent = playSpeed+'x'; }
+  else if (e.code === 'ArrowDown') { e.preventDefault(); speedIdx = Math.max(0, speedIdx-1); playSpeed = SPEEDS[speedIdx]; $('btn-speed').textContent = playSpeed+'x'; }
+  else if (e.code === 'Home') { e.preventDefault(); stopPlay(); renderFrame(0); drawStateBar(); }
+  else if (e.code === 'End') { e.preventDefault(); stopPlay(); renderFrame(frames.length-1); drawStateBar(); }
+});
+
+// Checkbox redraws
+['chk-arena','chk-pit','chk-footprint','chk-ebox','chk-trail','chk-heading','chk-velocity','chk-grid'].forEach(id => {
+  $(id).addEventListener('change', () => { if (frames.length) renderFrame(currentFrame); });
+});
+
+function togglePlay() {
+  if (playing) stopPlay();
+  else startPlay();
+}
+
+function startPlay() {
+  if (!frames.length) return;
+  if (currentFrame >= frames.length - 1) currentFrame = 0;
+  playing = true;
+  $('btn-play').textContent = '|| Pause';
+  $('btn-play').classList.add('active');
+  lastPlayTime = performance.now();
+  playTimeOffset = frames[currentFrame].t; // track where we are in log time
+  playLoop();
+}
+
+function stopPlay() {
+  playing = false;
+  $('btn-play').textContent = '\u25B6 Play';
+  $('btn-play').classList.remove('active');
+  if (playRAF) { cancelAnimationFrame(playRAF); playRAF = null; }
+}
+
+let playTimeOffset = 0;
+
+function playLoop() {
+  if (!playing) return;
+  const now = performance.now();
+  const wallDt = (now - lastPlayTime) / 1000 * playSpeed;
+  lastPlayTime = now;
+  playTimeOffset += wallDt;
+
+  // Advance to the frame at playTimeOffset
+  let next = currentFrame;
+  while (next < frames.length - 1 && frames[next + 1].t <= playTimeOffset) next++;
+
+  if (next !== currentFrame) {
+    renderFrame(next);
+    drawStateBar();
+  }
+
+  if (currentFrame >= frames.length - 1) {
+    stopPlay();
+    return;
+  }
+
+  playRAF = requestAnimationFrame(playLoop);
+}
+
+// ======================================================================
+// Helpers
+// ======================================================================
+function fmtTime(t) {
+  const mins = Math.floor(t / 60);
+  const secs = t % 60;
+  return `${mins}:${secs < 10 ? '0' : ''}${secs.toFixed(3)}`;
+}
+
+// Initial resize
+resizeCanvas();
+
+// Auto-load latest files from /logs/ endpoint (works when served via HTTP)
+(async function autoLoad() {
+  try {
+    const resp = await fetch('/logs/');
+    if (!resp.ok) return;
+    const html = await resp.text();
+    // Parse directory listing for .jsonl files
+    const jsonlMatches = html.match(/href="([^"]*\.jsonl)"/g);
+    if (!jsonlMatches || jsonlMatches.length === 0) return;
+    // Get the latest .jsonl by name (timestamped, so alphabetical = chronological)
+    const jsonlFiles = jsonlMatches.map(m => m.match(/href="([^"]*)"/)[1]).sort();
+    // Prefer frames_*.jsonl (real runs) over other files
+    const realRuns = jsonlFiles.filter(f => f.startsWith('frames_')).sort();
+    const allCandidates = realRuns.length > 0 ? realRuns : jsonlFiles;
+
+    // Try candidates from newest to oldest — pick the first one that has arena files
+    let loaded = false;
+    for (let ci = allCandidates.length - 1; ci >= 0 && !loaded; ci--) {
+      const candidate = allCandidates[ci];
+      const base = candidate.replace('.jsonl', '');
+      const filesToLoad = [
+        { url: '/logs/' + candidate, name: candidate, required: true },
+        { url: '/logs/' + base + '_arena.png', name: base + '_arena.png', required: false },
+        { url: '/logs/' + base + '_arena.json', name: base + '_arena.json', required: false },
+      ];
+
+      // Check if arena files exist for this candidate
+      const arenaCheck = await fetch('/logs/' + base + '_arena.json', { method: 'HEAD' }).catch(() => null);
+      const hasArena = arenaCheck && arenaCheck.ok;
+
+      // Skip candidates without arena files unless it's the last option
+      if (!hasArena && ci > 0) continue;
+
+      const fileObjects = [];
+      for (const f of filesToLoad) {
+        try {
+          const r = await fetch(f.url);
+          if (!r.ok) continue;
+          const blob = await r.blob();
+          fileObjects.push(new File([blob], f.name));
+        } catch(e) { /* optional file missing is fine */ }
+      }
+      if (fileObjects.length > 0) {
+        loadFiles(fileObjects);
+        console.log('Auto-loaded:', fileObjects.map(f => f.name));
+        loaded = true;
+      }
+    }
+  } catch(e) { /* not served via HTTP, or no logs dir — user can still drag-drop */ }
+})();
+</script>
+</body>
+</html>

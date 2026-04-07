@@ -49,6 +49,7 @@ from intercept import (
 from state_machine import BattleController, BattleContext
 from battle_config import BattleConfig
 from match_timer import MatchTimer, PinTimer
+from keyboard_poll import KeyboardPoller
 
 # Voice system (optional — graceful fallback if not available)
 try:
@@ -119,6 +120,9 @@ class AutoDriveApp:
                 self._voice = None
         else:
             self._voice = None
+
+        # Keyboard input — bypasses pygame/OpenCV message queue race
+        self._keyboard = KeyboardPoller()
 
         # Xbox button edge detection
         self._prev_ctrl_buttons = 0
@@ -720,8 +724,29 @@ class AutoDriveApp:
                     px_to_cm=self.tracker.px_to_cm,
                 )
 
-            # 3. Read controller
+            # 3. Read controller + keyboard
             ctrl = self.controller.read()
+            keys = self._keyboard.poll()  # hardware key state, no message queue
+
+            # 3a. Handle keyboard input (GetAsyncKeyState — never eaten by pygame)
+            if 'q' in keys:
+                self.running = False
+                break
+            if 'v' in keys:
+                if time.perf_counter() - getattr(self, '_last_verify_t', 0) > 3.0:
+                    self._last_verify_t = time.perf_counter()
+                    if self._run_verification():
+                        self._enter_ready()
+            if 'b' in keys:
+                if self.mode == MODE_BATTLE:
+                    self._emergency_stop()
+                elif self.mode == MODE_READY:
+                    self._start_battle()
+                else:
+                    self._start_battle()
+            if ' ' in keys:
+                if self.mode == MODE_READY:
+                    self._start_battle()
 
             # 3b. Xbox button edge detection (rising edge = press)
             btn_pressed = ctrl.buttons & ~self._prev_ctrl_buttons
@@ -1464,10 +1489,11 @@ class AutoDriveApp:
                             cv2.setMouseCallback("Auto-Drive", self._on_cv_click)
                             self._cv_callback_set = True
 
+                        # waitKey pumps OpenCV HighGUI — needed for imshow/mouse
+                        # Key handling is done via KeyboardPoller above (GetAsyncKeyState)
+                        # Only calibration keys (p, a, r, i, t) remain here
                         key = cv2.waitKey(1) & 0xFF
-                        if key == ord("q"):
-                            self.running = False
-                        elif key == ord("p"):
+                        if key == ord("p"):
                             self._handle_calibration({"action": "floor_plane"})
                         elif key == ord("a"):
                             # Auto-detect arena walls
@@ -1523,22 +1549,6 @@ class AutoDriveApp:
                                 self._pursuit_fsm.reset()
                                 self._enemy_tracker.reset()
                                 print("[main] Intercept TRACKING — press SPACE to charge")
-                        elif key == ord("v"):
-                            # Run system verification → enter ready mode
-                            # Cooldown prevents re-trigger from queued keypresses
-                            if time.perf_counter() - getattr(self, '_last_verify_t', 0) > 3.0:
-                                self._last_verify_t = time.perf_counter()
-                                if self._run_verification():
-                                    self._enter_ready()
-                        elif key == ord("b"):
-                            # Toggle battle mode
-                            if self.mode == MODE_BATTLE:
-                                self._emergency_stop()
-                            elif self.mode == MODE_READY:
-                                self._start_battle()
-                            else:
-                                # Direct battle start (skip verification)
-                                self._start_battle()
                         elif key == ord("t"):
                             # Pit calibration — mark 2 opposite corners
                             if self._pit_calibrating:
@@ -1552,10 +1562,8 @@ class AutoDriveApp:
                                 self._pit_corner1_cm = None
                                 print("[pit-cal] Click two OPPOSITE corners of the pit on the camera view")
                         elif key == ord(" "):
-                            # SPACE — start battle from ready, or trigger charge
-                            if self.mode == MODE_READY:
-                                self._start_battle()
-                            elif self.mode == MODE_INTERCEPT and self._enemy_tracker.is_tracking:
+                            # SPACE — trigger charge (battle/ready start handled by KeyboardPoller)
+                            if self.mode == MODE_INTERCEPT and self._enemy_tracker.is_tracking:
                                 self.mode = MODE_INTERCEPT_CHARGE
                                 self._pursuit_fsm.reset()
                                 # Skip ACQUIRE — enemy already tracked, go straight to INTERCEPT

@@ -93,7 +93,7 @@ def run_hold_test(comms, camera, tracker, telemetry, duration=10.0):
 
         # Track ArUco
         poses = tracker.detect(frame)
-        our_pose = next((d for d in poses if d["id"] == 1), None)  # marker ID 1
+        our_pose = next((d for d in poses if d["id"] == 0), None)  # marker ID 1
 
         # Show telemetry
         telem = telemetry.get()
@@ -139,13 +139,18 @@ def run_drive_test(comms, camera, tracker, telemetry, speed=0.5, duration=3.0, m
     positions = []  # (time, x, y, heading_deg)
     start_pose = None
 
-    # Capture a few frames to get start position
-    for _ in range(10):
+    # Capture frames until we find the marker (show camera so user can position)
+    print("  Looking for ArUco marker ID 1... (press 'q' to abort)")
+    for _ in range(300):  # ~10 seconds at 30fps
         frame = camera.read()
         if frame is None:
             continue
         poses = tracker.detect(frame)
-        det = next((d for d in poses if d["id"] == 1), None)
+        det = next((d for d in poses if d["id"] == 0), None)
+        cv2.imshow("Drive Test - Position Robot", frame)
+        if cv2.waitKey(1) & 0xFF == ord('q'):
+            print("  Aborted.")
+            return
         if det is not None:
             start_pose = det
             break
@@ -169,7 +174,7 @@ def run_drive_test(comms, camera, tracker, telemetry, speed=0.5, duration=3.0, m
         comms.send_heading(target_heading_deg=0.0, speed_norm=speed)
 
         poses = tracker.detect(frame)
-        our_pose = next((d for d in poses if d["id"] == 1), None)
+        our_pose = next((d for d in poses if d["id"] == 0), None)
         elapsed = time.monotonic() - start
 
         if our_pose:

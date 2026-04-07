@@ -22,7 +22,6 @@ MAX_INT16 = 32767
 MODE_DIRECT = 0
 MODE_GYRO_TURN = 1
 MODE_HEADING = 3
-MODE_CV_UPDATE = 4
 
 
 class RobotComms:
@@ -156,36 +155,6 @@ class RobotComms:
                 print(f"[comms] dry-run  HEADING target={target_heading_deg:+.1f}° speed={speed_norm:+.2f}")
                 self._last_log_time = now
             self.packets_sent += 1
-            return
-
-        try:
-            self._sock.sendto(packet, self._addr)
-        except OSError:
-            pass
-        self.packets_sent += 1
-
-    def send_cv_correction(self, cv_heading_deg):
-        """Send CV heading correction to ESP32 (Mode 4).
-
-        Fused into ESP32's complementary filter for drift correction.
-
-        Args:
-            cv_heading_deg: absolute heading from ArUco in degrees
-        """
-        cv_cdeg = int(cv_heading_deg * 100)
-        cv_cdeg = max(-32767, min(32767, cv_cdeg))
-        ts = int(time.monotonic() * 1000) & 0xFFFF  # 16-bit wrapping timestamp
-
-        # 10 bytes: zeros(4) + buttons(u8=0) + mode(u8=4) + cv_heading(i16) + timestamp(u16)
-        packet = struct.pack(">hhBBhH",
-                             0,               # bytes 0-1: zero
-                             0,               # bytes 2-3: zero
-                             0,               # byte 4: buttons
-                             MODE_CV_UPDATE,  # byte 5: mode = 4
-                             cv_cdeg,         # bytes 6-7: CV heading
-                             ts)              # bytes 8-9: timestamp
-
-        if self._dry_run:
             return
 
         try:

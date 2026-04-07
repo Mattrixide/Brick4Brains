@@ -347,6 +347,7 @@ class AutoDriveApp:
         self._flourish_timer = None
         # Don't reset enemy tracker — preserve tracking from ready mode
         self.mode = MODE_BATTLE
+        self._battle_start_t = time.perf_counter()
         print("[battle] FIGHT! Match started!")
         self._say("Fight!")
 
@@ -1083,10 +1084,13 @@ class AutoDriveApp:
                         print("[battle] Flourish complete — idle")
                 # Normal battle mode
                 else:
-                    # Check for controller override
-                    override = (abs(ctrl.throttle) > 0.25 or
-                                abs(ctrl.steering) > 0.25 or
-                                ctrl.buttons != 0)
+                    # Check for controller override (grace period after battle start
+                    # to avoid B button press bleeding into override detection)
+                    battle_age = now - getattr(self, '_battle_start_t', 0)
+                    override = battle_age > 0.5 and (
+                        abs(ctrl.throttle) > 0.25 or
+                        abs(ctrl.steering) > 0.25 or
+                        ctrl.buttons != 0)
                     if override:
                         print("[battle] Xbox override — switching to IDLE")
                         self.mode = MODE_IDLE
@@ -1104,6 +1108,13 @@ class AutoDriveApp:
                         self._battle_controller.reset()
                     else:
                         # Build context from current sensor data
+                        # Freeze our position when ArUco is lost (avoid (0,0) phantom)
+                        if detected:
+                            self._last_known_pos = (x_cm, y_cm)
+                            self._last_known_heading = heading_rad
+                        battle_pos = (x_cm, y_cm) if detected else getattr(self, '_last_known_pos', (x_cm, y_cm))
+                        battle_heading = heading_rad if detected else getattr(self, '_last_known_heading', heading_rad)
+
                         enemy_pos = None
                         enemy_heading = self._enemy_tracker.heading_rad  # from orientation estimator
                         enemy_vel = None
@@ -1132,8 +1143,8 @@ class AutoDriveApp:
                             accel_y = tel.get("accel_y", 0.0)
 
                         ctx = BattleContext(
-                            our_pos=(x_cm, y_cm),
-                            our_heading_rad=heading_rad,
+                            our_pos=battle_pos,
+                            our_heading_rad=battle_heading,
                             our_velocity=self._our_velocity,
                             enemy_pos=enemy_pos,
                             enemy_heading_rad=enemy_heading,
@@ -1156,8 +1167,8 @@ class AutoDriveApp:
                                 output.target_speed,
                                 output.buttons,
                             )
-                            throttle = 0.0
-                            steering = 0.0
+                            throttle = output.target_speed
+                            steering = output.target_omega_dps / 300.0
                             buttons = output.buttons
                             self._rate_mode_active = True
                         else:
@@ -1306,6 +1317,7 @@ class AutoDriveApp:
                     "et": self._enemy_tracker.is_tracking,
                     "dist": round(math.hypot(float(e_pos[0]) - x_cm, float(e_pos[1]) - y_cm), 1) if has_enemy and detected else 999.0,
                     "thr": round(throttle, 3), "str": round(steering, 3),
+                    "rm": 1 if getattr(self, '_rate_mode_active', False) else 0,
                 }
                 self._frame_log_file.write(json.dumps(rec, separators=(",", ":")) + "\n")
                 self._frame_count += 1

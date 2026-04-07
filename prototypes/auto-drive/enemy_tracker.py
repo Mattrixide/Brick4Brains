@@ -653,10 +653,20 @@ class EnemyTracker:
     def update(self, frame, our_robot_corners=None, px_to_cm=None,
                use_reference_diff=True):
         """Run detection + Kalman update for this frame."""
-        # Use last raw detection as prediction hint for blob selection
-        predicted_px = self._last_detection_px
-        det_px = self.detector.detect(frame, our_robot_corners,
-                                       predicted_px=predicted_px)
+        # Skip detection when our ArUco is lost — stale footprint mask
+        # causes self-detection (our robot detected as enemy)
+        if our_robot_corners is None:
+            det_px = None
+            self._last_detection_px = None  # clear stale prediction bias
+            self._aruco_reacquire_cooldown = 2
+        elif getattr(self, '_aruco_reacquire_cooldown', 0) > 0:
+            # Skip 2 frames after ArUco reacquires (ghost transient)
+            det_px = None
+            self._aruco_reacquire_cooldown -= 1
+        else:
+            predicted_px = self._last_detection_px
+            det_px = self.detector.detect(frame, our_robot_corners,
+                                           predicted_px=predicted_px)
 
         # Convert to world coordinates if detection available
         det_cm = None

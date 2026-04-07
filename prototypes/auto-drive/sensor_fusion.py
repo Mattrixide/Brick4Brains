@@ -204,7 +204,7 @@ class HeadingFusion:
         If offset is calibrated, updates fused heading.
         """
         self._imu_yaw_deg = imu_yaw_deg
-        if self._offset_calibrated:
+        if self._offset_calibrated and self._frames_without_cv > 0:
             self.heading_deg = imu_yaw_deg - self._offset_deg
 
     def update_gyro(self, gyro_z_dps: float, dt: float):
@@ -213,7 +213,7 @@ class HeadingFusion:
         Fallback if HTTP polling isn't fast enough.
         """
         self._imu_yaw_deg += gyro_z_dps * dt
-        if self._offset_calibrated:
+        if self._offset_calibrated and self._frames_without_cv > 0:
             self.heading_deg = self._imu_yaw_deg - self._offset_deg
 
     def update_cv(self, cv_heading_rad: float):
@@ -229,7 +229,10 @@ class HeadingFusion:
         # Calibrate offset: offset = IMU_yaw - ArUco_heading
         self._offset_deg = self._imu_yaw_deg - cv_deg
         self._offset_calibrated = True
-        self.heading_deg = cv_deg  # snap to CV
+        # Smooth blend instead of hard snap — prevents oscillation during turns
+        diff = cv_deg - self.heading_deg
+        diff = (diff + 180) % 360 - 180  # wrap to [-180, 180]
+        self.heading_deg = self.heading_deg + diff * 0.7
 
     def update_no_cv(self):
         """Called when ArUco detection fails this frame."""

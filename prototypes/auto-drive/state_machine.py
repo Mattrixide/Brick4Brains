@@ -74,7 +74,7 @@ _STATES = [
     "acquire",
     {
         "name": "charge",
-        "children": ["pursue", "flank", "ram", "pin"],
+        "children": ["pursue", "flank", "ram", "pin", "reorient"],
         "initial": "pursue",
     },
     {
@@ -122,6 +122,7 @@ class BattleController:
         self._last_positions: list[tuple[float, float, float]] = []  # (x, y, t)
         self._last_enemy_pos: tuple[float, float] | None = None
         self._reposition_timer: float | None = None
+        self._reorient_timer: float | None = None
         self._log_t = 0.0
 
         # Pit strategy state
@@ -189,7 +190,7 @@ class BattleController:
 
         # Enemy lost → lost_target (from combat states, not evade/unstick)
         if current in ("charge_pursue", "charge_flank", "charge_ram",
-                        "pit_position", "pit_push"):
+                        "charge_reorient", "pit_position", "pit_push"):
             if not ctx.enemy_detected and ctx.frames_without_detection > 30:
                 self._enter_lost_target(now)
                 return self._action_lost_target(ctx, now)
@@ -201,6 +202,7 @@ class BattleController:
             "charge_pursue": self._action_charge_pursue,
             "charge_flank": self._action_charge_flank,
             "charge_ram": self._action_charge_ram,
+            "charge_reorient": self._action_charge_reorient,
             "charge_pin": self._action_charge_pin,
             "pit_position": self._action_pit_position,
             "pit_push": self._action_pit_push,
@@ -236,6 +238,7 @@ class BattleController:
         self._last_positions.clear()
         self._last_enemy_pos = None
         self._reposition_timer = None
+        self._reorient_timer = None
         self._pit_abort_timer = None
         self.pin_timer.reset()
 
@@ -379,13 +382,12 @@ class BattleController:
 
         urgency = self.match_timer.urgency
 
-        # Check if we need to flank to safe side
-        # Only flank when far enough to maneuver (not point-blank)
-        if (ctx.enemy_heading_rad is not None
-                and ctx.distance_cm > self.cfg.charge_close_range_cm * 2):
-            if needs_flanking(ctx.our_pos, ctx.enemy_pos, ctx.enemy_heading_rad, self.cfg.safe_side):
-                self.machine.set_state("charge_flank")
-                return self._action_charge_flank(ctx, now)
+        # Flanking disabled — direct charge only for now
+        # if (ctx.enemy_heading_rad is not None
+        #         and ctx.distance_cm > self.cfg.charge_close_range_cm * 2):
+        #     if needs_flanking(ctx.our_pos, ctx.enemy_pos, ctx.enemy_heading_rad, self.cfg.safe_side):
+        #         self.machine.set_state("charge_flank")
+        #         return self._action_charge_flank(ctx, now)
 
         # Close range → RAM
         if ctx.distance_cm < self.cfg.charge_close_range_cm:
@@ -410,25 +412,79 @@ class BattleController:
         alpha = _angle_diff(desired_heading, ctx.our_heading_rad)
 
         # Rate mode: compute desired angular velocity (frame-invariant)
-        # Kp_omega converts heading error (rad) to turn rate (dps)
-        Kp_omega = 120.0  # dps per radian — 1 rad error → 120 dps turn
-        omega = Kp_omega * alpha
+        # Negate because positive omega = CW on our robot (IMU mounted inverted)
+        Kp_omega = 200.0  # dps per radian — increased for tighter pursuit arcs
+        omega = -Kp_omega * alpha
         omega = max(-300.0, min(300.0, omega))  # clamp to 300 dps
 
-        # Speed: reduce proportionally to heading error
         alpha_abs = abs(alpha)
-        if alpha_abs > 1.0:
-            # Way off → spin in place
-            speed = 0.0
-        elif alpha_abs < 0.18:
-            # <10 deg → full speed
-            speed = 1.0
-        else:
-            # Linear ramp
-            speed = max(0.25, 1.0 - (alpha_abs - 0.18) * 0.86)
-        speed *= (1.0 - min(abs(omega) / 300.0, 1.0) * 0.2)  # slow when turning hard
+
+        # Diagnostic logging every 0.5s
+        if now - self._log_t > 0.5:
+            self._log_t = now
+            log.info("[pursue] pos=(%.0f,%.0f) h=%.0f° enemy=(%.0f,%.0f) desired=%.0f° alpha=%.0f° omega=%.0f speed=%.2f dist=%.0f",
+                     ctx.our_pos[0], ctx.our_pos[1], math.degrees(ctx.our_heading_rad),
+                     ctx.enemy_pos[0], ctx.enemy_pos[1],
+                     math.degrees(desired_heading), math.degrees(alpha),
+                     omega, math.cos(alpha), ctx.distance_cm)
+
+        # Reorient if facing away from enemy — back up + spin, attack front-first
+        if alpha_abs > math.radians(110):
+            log.info("[pursue] REORIENT triggered: alpha=%.0f°", math.degrees(alpha))
+            self.machine.set_state("charge_reorient")
+            self._reorient_timer = now
+            return self._action_charge_reorient(ctx, now)
+
+        # Forward pursuit: cos² scaling — slows more at moderate error for tighter arcs
+        speed = math.cos(alpha) ** 2
+        speed *= (1.0 - min(abs(omega) / 300.0, 1.0) * 0.3)
+        speed = max(0.15, speed)
 
         return BattleOutput(target_omega_dps=omega, target_speed=speed)
+
+    def _action_charge_reorient(self, ctx: BattleContext, now: float) -> BattleOutput:
+        """Back up briefly, spin to face enemy, then resume pursuit."""
+        if self._reorient_timer is None:
+            self._reorient_timer = now
+
+        elapsed = now - self._reorient_timer
+
+        # Abort if enemy closes to contact
+        if ctx.enemy_detected and ctx.distance_cm < 10:
+            self._reorient_timer = None
+            self.machine.set_state("charge_ram")
+            return BattleOutput(throttle=1.0, steering=0.0)
+
+        # Phase 1: Backup (0-0.25s) — straight reverse, gyro holds heading
+        if elapsed < 0.25:
+            return BattleOutput(target_omega_dps=0.0, target_speed=-0.35)
+
+        # Phase 2: Spin to face enemy
+        if ctx.enemy_pos is not None:
+            desired = math.atan2(
+                ctx.enemy_pos[1] - ctx.our_pos[1],
+                ctx.enemy_pos[0] - ctx.our_pos[0],
+            )
+            alpha = _angle_diff(desired, ctx.our_heading_rad)
+
+            # Aligned enough — resume pursuit
+            if abs(alpha) < math.radians(40):
+                self._reorient_timer = None
+                self.machine.set_state("charge_pursue")
+                return self._action_charge_pursue(ctx, now)
+
+            # Spin shortest path (negated — positive omega = CW on our robot)
+            omega = -300.0 if alpha > 0 else 300.0
+            return BattleOutput(target_omega_dps=omega, target_speed=0.25)
+
+        # Timeout after 1.5s total
+        if elapsed > 1.5:
+            self._reorient_timer = None
+            self.machine.set_state("charge_pursue")
+            return self._action_charge_pursue(ctx, now)
+
+        # Blind spin (no enemy tracking)
+        return BattleOutput(target_omega_dps=300.0, target_speed=0.25)
 
     def _action_charge_flank(self, ctx: BattleContext, now: float) -> BattleOutput:
         """Arc around to the enemy's safe side before committing."""
@@ -452,15 +508,33 @@ class BattleController:
             target[0] - ctx.our_pos[0],
         )
         alpha = _angle_diff(desired_heading, ctx.our_heading_rad)
+        alpha_abs = abs(alpha)
 
-        if abs(alpha) > 1.0:
-            return BattleOutput(
-                throttle=0.0,
-                steering=0.5 if alpha > 0 else -0.5,
-            )
+        # Rate mode with bidirectional pursuit (same as charge_pursue)
+        Kp_omega = 120.0
+        omega = -Kp_omega * alpha  # negated — positive omega = CW on our robot
+        omega = max(-300.0, min(300.0, omega))
 
-        steering = max(-0.5, min(0.5, alpha * 0.5))
-        return BattleOutput(throttle=0.8, steering=steering)
+        if not hasattr(self, '_flank_reversing'):
+            self._flank_reversing = False
+        if alpha_abs > math.radians(100):
+            self._flank_reversing = True
+        elif alpha_abs < math.radians(80):
+            self._flank_reversing = False
+
+        if not self._flank_reversing:
+            speed = math.cos(alpha) * 0.8  # slightly slower than pursue
+        else:
+            reverse_alpha = math.pi - alpha_abs
+            speed = -math.cos(reverse_alpha) * 0.8
+
+        speed *= (1.0 - min(abs(omega) / 300.0, 1.0) * 0.2)
+        if speed >= 0:
+            speed = max(0.15, speed)
+        else:
+            speed = min(-0.15, speed)
+
+        return BattleOutput(target_omega_dps=omega, target_speed=speed)
 
     def _action_charge_ram(self, ctx: BattleContext, now: float) -> BattleOutput:
         """Full throttle final approach — push enemy to wall."""
@@ -482,6 +556,12 @@ class BattleController:
             ctx.enemy_pos[0] - ctx.our_pos[0],
         )
         alpha = _angle_diff(desired_heading, ctx.our_heading_rad)
+
+        # Overshot — facing away and distance increasing, drop to pursue→reorient
+        if abs(alpha) > math.radians(90) and ctx.distance_cm > self.cfg.charge_close_range_cm:
+            self.machine.set_state("charge_pursue")
+            return self._action_charge_pursue(ctx, now)
+
         steering = max(-0.3, min(0.3, alpha * 0.3))
 
         urgency = self.match_timer.urgency

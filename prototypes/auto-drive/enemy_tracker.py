@@ -55,21 +55,24 @@ class EnemyKalmanFilter:
         self.R = np.eye(2, dtype=np.float64) * sigma_meas**2
 
         self.frames_without_detection = 0
-        self.max_coast = 120  # ~2s at 60fps — coast longer during charge
+        self.max_coast = 30  # ~0.5s at 60fps
         self._initialized = False
 
     def predict(self):
         """Predict step — call every frame."""
         if not self._initialized:
             return
+        # Decay velocity when coasting (no detections)
+        if self.frames_without_detection > 0:
+            self.x[2] *= 0.95
+            self.x[3] *= 0.95
         self.x = self.F @ self.x
-        # Clamp position to arena bounds (2.0m = 200cm)
-        self.x[0] = np.clip(self.x[0], -2.0, 2.0)
-        self.x[1] = np.clip(self.x[1], -2.0, 2.0)
+        # Clamp to arena bounds, zero velocity if clamped
+        for i, vi in [(0, 2), (1, 3)]:
+            if self.x[i] < -2.0 or self.x[i] > 2.0:
+                self.x[i] = np.clip(self.x[i], -2.0, 2.0)
+                self.x[vi] = 0.0
         self.P = self.F @ self.P @ self.F.T + self.Q
-
-    # Mahalanobis distance gate — reject measurements too far from prediction
-    GATE_THRESHOLD = 4.0  # loosened — enemy gets rammed and flies across arena
 
     def update(self, measurement):
         """Update step — call with [x, y] when detection available, None otherwise."""
@@ -83,31 +86,9 @@ class EnemyKalmanFilter:
                 self.frames_without_detection = 0
                 return
 
-            # Innovation
+            # Standard Kalman update (gating handled by EnemyTracker speed gate)
             y = z - self.H @ self.x
             S = self.H @ self.P @ self.H.T + self.R
-
-            # Adaptive Mahalanobis gating — widens when measurements are rejected
-            gate = self.GATE_THRESHOLD * (1.0 + 0.5 * self.frames_without_detection)
-            gate = min(gate, self.GATE_THRESHOLD * 4)  # cap at 4x
-            mahal_sq = float(y.T @ np.linalg.inv(S) @ y)
-            if mahal_sq > gate ** 2:
-                self.frames_without_detection += 1
-                # Soft reset after 8 consecutive rejections — filter has diverged
-                if self.frames_without_detection >= 8:
-                    self.x[:2] = z  # snap position to measurement
-                    self.P *= 50.0  # inflate covariance
-                    self.frames_without_detection = 0
-                return
-
-            # Reject physically impossible jumps (>100cm in one frame)
-            # A beetleweight cannot move 100cm in 16ms regardless of coast time
-            jump_cm = float(np.linalg.norm(y)) * 100.0  # m to cm
-            if jump_cm > 100.0:
-                # This is a target switch, not real movement — reject
-                self.frames_without_detection += 1
-                return
-
             K = self.P @ self.H.T @ np.linalg.inv(S)
 
             self.x = self.x + K @ y
@@ -120,12 +101,6 @@ class EnemyKalmanFilter:
                 scale = MAX_VEL / speed
                 self.x[2] *= scale
                 self.x[3] *= scale
-
-            # Adaptive process noise (NIS check)
-            if mahal_sq > 6.0:
-                self.Q = self.Q_baseline * 4.0
-            elif mahal_sq < 1.0:
-                self.Q = self.Q * 0.9 + self.Q_baseline * 0.1
 
             self.frames_without_detection = 0
         else:
@@ -297,7 +272,8 @@ class EnemyDetector:
     def has_reference(self) -> bool:
         return self._warmup_frames >= self._warmup_needed
 
-    def detect(self, frame, our_robot_corners=None, use_reference_diff=True):
+    def detect(self, frame, our_robot_corners=None, use_reference_diff=True,
+               predicted_px=None):
         """Detect enemy. Returns (cx, cy) in pixels or None.
 
         Uses reference frame absdiff as primary detection (no MOG2).
@@ -362,10 +338,14 @@ class EnemyDetector:
             cv2.fillPoly(fg_mask, [self._robot_footprint], 0)
 
         # Progressive reference healing: slowly blend current frame into reference
-        # where our robot ISN'T. Ghost blobs at old positions fade in ~2 seconds.
+        # where our robot and enemy AREN'T. Ghost blobs at old positions fade in ~1s.
         if self._reference_gray is not None and self._robot_footprint is not None:
             heal_mask = np.ones((h, w), dtype=np.uint8) * 255
             cv2.fillPoly(heal_mask, [self._robot_footprint], 0)  # exclude current robot pos
+            # Exclude enemy detection area (use previous frame's detection)
+            if self._track_lock_px is not None:
+                ex, ey = int(self._track_lock_px[0]), int(self._track_lock_px[1])
+                cv2.circle(heal_mask, (ex, ey), 60, 0, -1)
             if self._arena_pts is not None and self._arena_mask is not None:
                 heal_mask = cv2.bitwise_and(heal_mask, self._arena_mask)
             alpha_heal = 0.05  # ~1s to fully heal at 60fps (0.95^60 ≈ 0.05)
@@ -438,10 +418,10 @@ class EnemyDetector:
                 score = 0.0
                 score += 5000 if moving else 0
                 score += area
-                if self._track_lock_px is not None:
-                    lx, ly = self._track_lock_px
-                    dist = math.sqrt((cx-lx)**2 + (cy-ly)**2)
-                    score -= dist * 0.5
+                # Penalize distance from Kalman prediction (if available)
+                if predicted_px is not None:
+                    dist_to_pred = math.sqrt((cx - predicted_px[0])**2 + (cy - predicted_px[1])**2)
+                    score -= dist_to_pred * 2.0
                 # Penalize detections near our robot — likely self-detection leak
                 if our_center is not None:
                     dist_to_us = math.sqrt((cx - our_center[0])**2 + (cy - our_center[1])**2)
@@ -458,10 +438,6 @@ class EnemyDetector:
             self._track_lock_px = result
 
         return result
-
-    @property
-    def fg_mask(self):
-        return self._last_fg_mask
 
     @property
     def fg_mask(self):
@@ -666,7 +642,7 @@ class EnemyTracker:
             vel = tracker.velocity_cm_s
     """
 
-    def __init__(self, dt=1/60, sigma_a=5.0, sigma_meas_cm=1.0):
+    def __init__(self, dt=1/60, sigma_a=5.0, sigma_meas_cm=8.0):
         self.detector = EnemyDetector()
         self.kalman = EnemyKalmanFilter(dt=dt, sigma_a=sigma_a,
                                          sigma_meas=sigma_meas_cm / 100.0)
@@ -677,7 +653,10 @@ class EnemyTracker:
     def update(self, frame, our_robot_corners=None, px_to_cm=None,
                use_reference_diff=True):
         """Run detection + Kalman update for this frame."""
-        det_px = self.detector.detect(frame, our_robot_corners)
+        # Use last raw detection as prediction hint for blob selection
+        predicted_px = self._last_detection_px
+        det_px = self.detector.detect(frame, our_robot_corners,
+                                       predicted_px=predicted_px)
 
         # Convert to world coordinates if detection available
         det_cm = None
@@ -698,9 +677,14 @@ class EnemyTracker:
                         gate_m = 0.5 + 0.3 * self.kalman.frames_without_detection
                         gate_m = min(gate_m, 3.0)
                         if jump_m > gate_m:
-                            # Too far — but if we've been coasting, accept and reset
+                            # Too far — but if we've been coasting, reinit filter
                             if self.kalman.frames_without_detection >= 5:
-                                det_cm = det_m  # accept anyway, Kalman will soft-reset
+                                det_cm = det_m
+                                # Reinit: snap position, zero velocity, inflate P
+                                self.kalman.x[:2] = np.array(det_m)
+                                self.kalman.x[2:] = 0.0
+                                self.kalman.P = np.eye(4) * 10.0
+                                self.kalman.frames_without_detection = 0
                             else:
                                 det_px = None
                                 det_m = None
@@ -880,7 +864,5 @@ class EnemyTracker:
     def reset(self):
         self.kalman.reset()
         self.detector._track_lock_px = None
-        self.detector._consecutive_detections = 0
-        self.detector._static_positions = []
         self._last_detection_px = None
         self._last_detection_cm = None

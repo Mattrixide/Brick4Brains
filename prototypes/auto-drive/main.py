@@ -175,7 +175,7 @@ class AutoDriveApp:
         self._load_drive_calibration()
 
         # Enemy tracking + interception
-        self._enemy_tracker = EnemyTracker(dt=1/60, sigma_a=5.0, sigma_meas_cm=5.0)
+        self._enemy_tracker = EnemyTracker(dt=1/60, sigma_a=5.0, sigma_meas_cm=8.0)
         self._pursuit_fsm = PursuitFSM()
         self._smoothed_intercept = SmoothedIntercept(alpha=0.3)
         self._our_velocity = (0.0, 0.0)  # estimated from position changes

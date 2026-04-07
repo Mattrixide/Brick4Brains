@@ -259,93 +259,55 @@ class AutoDriveApp:
             cv2.waitKey(1)
 
     def _run_verification(self):
-        """Run 4-step system verification with visual feedback. Returns True if all pass."""
-        print("=" * 40)
-        print("  SYSTEM VERIFICATION")
-        print("=" * 40)
+        """Run system verification — fast, non-blocking. Returns True if all pass."""
         results = []
         passed = 0
 
-        # 1. ESP32 connection
-        results.append("[1/4] ESP32 ... checking")
-        self._verify_show(results)
+        # 1. ESP32
         esp_ok = self.comms.connected and not self.comms._dry_run
-        results[-1] = f"[1/4] ESP32: {'PASS' if esp_ok else 'FAIL'}"
-        self._verify_show(results)
-        print(f"  {results[-1]}")
+        results.append(f"[1/4] ESP32: {'PASS' if esp_ok else 'FAIL'}")
         passed += esp_ok
 
-        # 2. Motor test
-        results.append("[2/4] Motors ... checking")
-        self._verify_show(results)
+        # 2. Motors — tiny nudge (no sleep)
         if esp_ok:
-            results[-1] = "[2/4] Motors ... forward pulse"
-            self._verify_show(results)
-            for _ in range(15):
-                self.comms.send(0.3, 0.0)
-                time.sleep(0.02)
-            results[-1] = "[2/4] Motors ... reverse pulse"
-            self._verify_show(results)
-            for _ in range(15):
-                self.comms.send(-0.3, 0.0)
-                time.sleep(0.02)
+            for _ in range(5):
+                self.comms.send(0.15, 0.0)
             self.comms.stop()
-            results[-1] = "[2/4] Motors: PASS"
+            results.append("[2/4] Motors: PASS")
             passed += 1
         else:
-            results[-1] = "[2/4] Motors: FAIL (no ESP32)"
-        self._verify_show(results)
-        print(f"  {results[-1]}")
+            results.append("[2/4] Motors: FAIL (no ESP32)")
 
-        # 3. IMU — send packets to wake up telemetry
-        results.append("[3/4] IMU ... checking")
-        self._verify_show(results)
-        for _ in range(10):
-            self.comms.send(0.0, 0.0, 0)
-            time.sleep(0.02)
-        time.sleep(0.3)
+        # 3. IMU
         imu_ok = self._telemetry.is_active
-        results[-1] = f"[3/4] IMU: {'PASS' if imu_ok else 'FAIL'}"
-        self._verify_show(results)
-        print(f"  {results[-1]}")
+        results.append(f"[3/4] IMU: {'PASS' if imu_ok else 'FAIL'}")
         passed += imu_ok
 
         # 4. Camera
-        results.append("[4/4] Camera ... checking")
-        self._verify_show(results)
-        frame = self.camera.read() if self.camera else None
-        cam_ok = frame is not None
-        results[-1] = f"[4/4] Camera: {'PASS' if cam_ok else 'FAIL'}"
-        self._verify_show(results)
-        print(f"  {results[-1]}")
+        cam_ok = self.camera is not None and self.camera.read() is not None
+        results.append(f"[4/4] Camera: {'PASS' if cam_ok else 'FAIL'}")
         passed += cam_ok
 
-        # Final result
-        results.append("")
+        # Show on screen + console
         if passed == 4:
-            results.append("VERIFIED - 4/4 checks passed")
+            results.append("")
+            results.append("VERIFIED - 4/4 passed")
         else:
-            results.append(f"INCOMPLETE - {passed}/4 checks passed")
+            results.append("")
+            results.append(f"INCOMPLETE - {passed}/4 passed")
         self._verify_show(results)
-        time.sleep(1.0)  # show result for 1 second
 
-        print("-" * 40)
-        print(f"  {'VERIFIED' if passed == 4 else 'INCOMPLETE'} — {passed}/4 checks passed")
+        print("=" * 40)
+        for r in results:
+            if r:
+                print(f"  {r}")
         print("=" * 40)
 
         self._verified = passed == 4
         if self._verified:
-            self._say("Systems verified. Ready for battle.")
+            self._say("Systems verified.")
         else:
-            failed = 4 - passed
-            self._say(f"Verification incomplete. {failed} checks failed.")
-
-        # Drain queued keypresses — check for quit
-        for _ in range(100):
-            k = cv2.waitKey(1) & 0xFF
-            if k == ord("q"):
-                self.running = False
-                return self._verified
+            self._say(f"Verification incomplete. {4 - passed} failed.")
 
         return self._verified
 
@@ -370,14 +332,14 @@ class AutoDriveApp:
         self._say("Ready for battle.")
 
     def _start_battle(self):
-        """Start battle mode from ready."""
+        """Start battle mode from ready. Keep enemy tracking — don't reset it."""
         self._system_mode = SYSTEM_BATTLE
         self._battle_controller.reset()
         self._match_timer.reset()
         self._match_timer.start()
         self._pin_timer.reset()
         self._flourish_timer = None
-        self._enemy_tracker.reset()
+        # Don't reset enemy tracker — preserve tracking from ready mode
         self.mode = MODE_BATTLE
         print("[battle] FIGHT! Match started!")
         self._say("Fight!")
@@ -716,7 +678,7 @@ class AutoDriveApp:
                 self._heading_fusion.update_no_cv()
 
             # 2b. Enemy tracking (run in ALL intercept-related modes)
-            if frame is not None and self.mode in (MODE_INTERCEPT, MODE_INTERCEPT_CHARGE, MODE_PIN, MODE_REVERSE, MODE_BATTLE):
+            if frame is not None and self.mode in (MODE_READY, MODE_INTERCEPT, MODE_INTERCEPT_CHARGE, MODE_PIN, MODE_REVERSE, MODE_BATTLE):
                 # Pass ArUco corners for color-based classification (not exclusion mask)
                 our_corners = pose.corners if pose is not None else None
                 self._enemy_tracker.update(
@@ -733,10 +695,9 @@ class AutoDriveApp:
                 self.running = False
                 break
             if 'v' in keys:
-                if time.perf_counter() - getattr(self, '_last_verify_t', 0) > 3.0:
+                if time.perf_counter() - getattr(self, '_last_verify_t', 0) > 2.0:
                     self._last_verify_t = time.perf_counter()
-                    if self._run_verification():
-                        self._enter_ready()
+                    self._run_verification()
             if 'b' in keys:
                 if self.mode == MODE_BATTLE:
                     self._emergency_stop()
@@ -761,12 +722,9 @@ class AutoDriveApp:
 
             # Start button
             elif btn_pressed & BTN_START:
-                if self.mode == MODE_IDLE:
-                    # Run verification and enter ready mode
-                    if self._run_verification():
-                        self._enter_ready()
+                if self.mode in (MODE_IDLE, MODE_MANUAL):
+                    self._enter_ready()
                 elif self.mode in (MODE_BATTLE, MODE_READY):
-                    # Exit battle/ready → idle
                     self._emergency_stop()
 
             # B button → start battle from ready

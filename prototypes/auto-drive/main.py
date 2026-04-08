@@ -1252,7 +1252,7 @@ class AutoDriveApp:
                     self._ready_log_t = now_t
                     esp_ok = self.comms.connected and not self.comms._dry_run
                     imu_ok = self._telemetry.is_active
-                    cam_ok = self._loop_fps > 30
+                    cam_ok = self._loop_fps > 20
                     aruco_ok = detected
                     print(f"[ready] STANDING BY — ESP:{'OK' if esp_ok else 'FAIL'}"
                           f" IMU:{'OK' if imu_ok else 'FAIL'}"

@@ -310,10 +310,11 @@ class ArUcoTracker:
         # Tuned detector parameters
         params = cv2.aruco.DetectorParameters()
         params.adaptiveThreshWinSizeMin = 3
-        params.adaptiveThreshWinSizeMax = 15
-        params.adaptiveThreshWinSizeStep = 6
-        params.minMarkerPerimeterRate = 0.04
-        params.maxMarkerPerimeterRate = 4.0
+        params.adaptiveThreshWinSizeMax = 53
+        params.adaptiveThreshWinSizeStep = 4
+        params.minMarkerPerimeterRate = 0.02
+        params.polygonalApproxAccuracyRate = 0.05
+        params.maxMarkerPerimeterRate = 0.25
         params.cornerRefinementMethod = cv2.aruco.CORNER_REFINE_NONE
         self.params = params
 

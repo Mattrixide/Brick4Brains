@@ -64,8 +64,8 @@ class EnemyKalmanFilter:
             return
         # Decay velocity when coasting (no detections)
         if self.frames_without_detection > 0:
-            self.x[2] *= 0.95
-            self.x[3] *= 0.95
+            self.x[2] *= 0.80
+            self.x[3] *= 0.80
         self.x = self.F @ self.x
         # Clamp to arena bounds, zero velocity if clamped
         for i, vi in [(0, 2), (1, 3)]:

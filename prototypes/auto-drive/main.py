@@ -355,6 +355,7 @@ class AutoDriveApp:
         self._match_timer.reset()
         self._battle_controller.reset()
         self._flourish_timer = None
+        self._rate_mode_active = False  # allow direct mode commands again
         self._say("Emergency stop")
         print("[EMERGENCY STOP] All systems halted")
 
@@ -1159,11 +1160,12 @@ class AutoDriveApp:
                         abs(ctrl.steering) > 0.25 or
                         ctrl.buttons != 0)
                     if override:
-                        print("[battle] Xbox override — switching to IDLE")
-                        self.mode = MODE_IDLE
+                        print("[battle] Xbox override — switching to MANUAL")
+                        self.mode = MODE_MANUAL
                         self._system_mode = SYSTEM_CONFIG
                         self._match_timer.reset()
                         self._battle_controller.reset()
+                        self._rate_mode_active = False
                         self.comms.stop()
                         throttle = ctrl.throttle
                         steering = ctrl.steering

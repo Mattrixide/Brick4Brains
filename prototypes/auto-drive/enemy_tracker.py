@@ -284,19 +284,27 @@ class EnemyDetector:
             our_robot_corners: ArUco corners array for our robot exclusion
             use_reference_diff: ignored (kept for API compatibility)
         """
-        h, w = frame.shape[:2]
-
+        # Downscale for speed (4x fewer pixels)
+        ds = 2  # downscale factor
         if len(frame.shape) == 3:
-            gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+            gray_full = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
         else:
-            gray = frame
+            gray_full = frame
+        gray = cv2.resize(gray_full, (frame.shape[1] // ds, frame.shape[0] // ds),
+                          interpolation=cv2.INTER_AREA)
+        h, w = gray.shape[:2]
 
         blurred = cv2.GaussianBlur(gray, (5, 5), 0)
 
+        # Downscale reference to match if needed
+        ref = self._reference_gray
+        if ref is not None and ref.shape != gray.shape:
+            ref = cv2.resize(ref, (w, h), interpolation=cv2.INTER_AREA)
+
         # Primary: reference frame diff (detects anything not floor)
         fg_mask = np.zeros((h, w), dtype=np.uint8)
-        if self._reference_gray is not None and self._reference_gray.shape == gray.shape:
-            diff = cv2.absdiff(blurred, self._reference_gray)
+        if ref is not None and ref.shape == gray.shape:
+            diff = cv2.absdiff(blurred, ref)
             _, fg_mask = cv2.threshold(diff, self.REF_DIFF_THRESHOLD, 255, cv2.THRESH_BINARY)
 
         # Secondary: frame-to-frame diff (tags moving objects)
@@ -311,51 +319,46 @@ class EnemyDetector:
         fg_mask = cv2.morphologyEx(fg_mask, cv2.MORPH_OPEN, self._kernel_open)
         fg_mask = cv2.morphologyEx(fg_mask, cv2.MORPH_CLOSE, self._kernel_close)
 
-        # Arena mask
+        # Arena mask (scaled to half-res)
         if self._arena_pts is not None:
             if self._arena_mask is None or self._arena_mask.shape != fg_mask.shape:
+                scaled_arena = (self._arena_pts / ds).astype(np.int32)
                 self._arena_mask = np.zeros(fg_mask.shape, dtype=np.uint8)
-                cv2.fillPoly(self._arena_mask, [self._arena_pts], 255)
+                cv2.fillPoly(self._arena_mask, [scaled_arena], 255)
             fg_mask = cv2.bitwise_and(fg_mask, self._arena_mask)
 
-        # Subtract our robot's footprint from foreground mask
-        # This replaces the old per-contour ArUco exclusion and handles
-        # the blob-merge case when robots are in contact.
-        # When ArUco is lost (corners=None), keep the last valid footprint
-        # to prevent the enemy tracker from locking onto our robot.
+        # Subtract our robot's footprint from foreground mask (scaled to half-res)
         if our_robot_corners is not None:
             new_fp = _compute_robot_footprint(our_robot_corners)
             if new_fp is not None:
                 self._robot_footprint = new_fp
             else:
-                # Fallback: simple circle exclusion
                 corners = our_robot_corners.reshape(-1, 2)
-                center = corners.mean(axis=0).astype(np.int32)
-                cv2.circle(fg_mask, tuple(center), ARUCO_EXCLUSION_RADIUS_PX, 0, -1)
+                center = (corners.mean(axis=0) / ds).astype(np.int32)
+                cv2.circle(fg_mask, tuple(center), ARUCO_EXCLUSION_RADIUS_PX // ds, 0, -1)
 
-        # Apply footprint mask (current or stale from last detection)
+        # Apply footprint mask (scaled to half-res)
         if self._robot_footprint is not None:
-            cv2.fillPoly(fg_mask, [self._robot_footprint], 0)
+            scaled_fp = (self._robot_footprint / ds).astype(np.int32)
+            cv2.fillPoly(fg_mask, [scaled_fp], 0)
 
-        # Progressive reference healing: slowly blend current frame into reference
-        # where our robot and enemy AREN'T. Ghost blobs at old positions fade in ~1s.
-        if self._reference_gray is not None and self._robot_footprint is not None:
-            heal_mask = np.ones((h, w), dtype=np.uint8) * 255
-            cv2.fillPoly(heal_mask, [self._robot_footprint], 0)  # exclude current robot pos
-            # Exclude enemy detection area (use previous frame's detection)
-            if self._track_lock_px is not None:
-                ex, ey = int(self._track_lock_px[0]), int(self._track_lock_px[1])
-                cv2.circle(heal_mask, (ex, ey), 60, 0, -1)
-            if self._arena_pts is not None and self._arena_mask is not None:
-                heal_mask = cv2.bitwise_and(heal_mask, self._arena_mask)
-            alpha_heal = 0.05  # ~1s to fully heal at 60fps (0.95^60 ≈ 0.05)
-            blended = cv2.addWeighted(
-                self._reference_gray, 1.0 - alpha_heal,
-                blurred, alpha_heal, 0
-            )
-            self._reference_gray = np.where(
-                heal_mask > 0, blended, self._reference_gray
-            )
+        # Progressive reference healing (at full-res, every 10 frames to save time)
+        if not hasattr(self, '_heal_counter'):
+            self._heal_counter = 0
+        self._heal_counter += 1
+        if self._reference_gray is not None and self._robot_footprint is not None and self._heal_counter % 10 == 0:
+            fh, fw = self._reference_gray.shape[:2]
+            blurred_full = cv2.GaussianBlur(gray_full, (5, 5), 0)
+            if blurred_full.shape == self._reference_gray.shape:
+                heal_mask = np.ones((fh, fw), dtype=np.uint8) * 255
+                cv2.fillPoly(heal_mask, [self._robot_footprint], 0)
+                if self._track_lock_px is not None:
+                    ex, ey = int(self._track_lock_px[0]), int(self._track_lock_px[1])
+                    cv2.circle(heal_mask, (ex, ey), 60, 0, -1)
+                alpha_heal = 0.05 * 10  # compensate for running every 10 frames
+                alpha_heal = min(alpha_heal, 0.3)
+                blended = cv2.addWeighted(self._reference_gray, 1.0 - alpha_heal, blurred_full, alpha_heal, 0)
+                self._reference_gray = np.where(heal_mask > 0, blended, self._reference_gray)
 
         self._last_fg_mask = fg_mask
 
@@ -371,9 +374,13 @@ class EnemyDetector:
 
         enemy_candidates = []
 
+        # Area thresholds scaled for half-res (area is ds^2 smaller)
+        min_area = self.MIN_AREA // (ds * ds)
+        max_area = self.MAX_AREA // (ds * ds)
+
         for c in contours:
             area = cv2.contourArea(c)
-            if area < self.MIN_AREA or area > self.MAX_AREA:
+            if area < min_area or area > max_area:
                 continue
 
             hull_area = cv2.contourArea(cv2.convexHull(c))
@@ -387,17 +394,17 @@ class EnemyDetector:
             cy = M["m01"] / M["m00"]
 
             # Check if this blob overlaps with temporal diff (is it moving?)
-            # Sample temporal mask at centroid ± small region
             cx_i, cy_i = int(cx), int(cy)
-            r = 20  # sample radius
+            r = 10  # sample radius (half-res)
             y0, y1 = max(0, cy_i-r), min(h, cy_i+r)
             x0, x1 = max(0, cx_i-r), min(w, cx_i+r)
             is_moving = False
             if y1 > y0 and x1 > x0:
                 region = temporal_mask[y0:y1, x0:x1]
-                is_moving = np.mean(region) > 30  # >30/255 means significant motion
+                is_moving = np.mean(region) > 30
 
-            enemy_candidates.append((cx, cy, area, is_moving, c))
+            # Scale centroid back to full-res for output
+            enemy_candidates.append((cx * ds, cy * ds, area * ds * ds, is_moving, c))
 
         # Pick best candidate using scoring:
         # - Moving blobs get priority (real enemy, not ghost)

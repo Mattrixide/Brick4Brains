@@ -225,6 +225,16 @@ class BattleController:
         # Fallback — should not reach here
         return BattleOutput()
 
+    @property
+    def debug_info(self) -> dict:
+        """Expose internal state for frame logging."""
+        return {
+            "stuck_frames": getattr(self, '_stuck_accel_frames', 0),
+            "unstick_phase": getattr(self, '_unstick_phase', 0),
+            "aruco_lost": self._aruco_lost_frames,
+            "retreat_reason": getattr(self, '_last_retreat_reason', None),
+        }
+
     def reset(self) -> None:
         """Reset to scan state for a new match."""
         # Force state back to scan
@@ -298,6 +308,9 @@ class BattleController:
             self._stuck_accel_frames = 0
 
         # Position-based fallback (works even without IMU)
+        # Only check when actually commanding throttle (not during acquire/standstill)
+        if abs(ctx.throttle_cmd) < 0.1:
+            return False
         if len(self._last_positions) < 10:
             return False
         oldest = self._last_positions[0]
@@ -321,6 +334,7 @@ class BattleController:
     def _enter_retreat(self, reason: str = "aruco_lost") -> None:
         self.machine.set_state("evade_retreat")
         self._retreat_timer = time.perf_counter()
+        self._last_retreat_reason = reason
         if reason == "aruco_lost":
             self._aruco_lost_frames = 0
         # Don't clear _last_enemy_pos — we want reengage to know where enemy was
@@ -809,9 +823,23 @@ class BattleController:
         """Oscillate forward/reverse to free from stuck position."""
         if self._unstick_timer is None:
             self._unstick_timer = now
+            self._unstick_start_pos = (ctx.our_pos[0], ctx.our_pos[1]) if ctx.our_detected else None
 
         elapsed = now - self._unstick_timer
+
+        # Early exit: moved enough to be free (>10cm from start)
+        if self._unstick_start_pos is not None and ctx.our_detected:
+            disp = math.hypot(ctx.our_pos[0] - self._unstick_start_pos[0],
+                              ctx.our_pos[1] - self._unstick_start_pos[1])
+            if disp > 10.0:
+                log.info("[battle] UNSTICK — freed (%.0fcm moved)", disp)
+                self._unstick_timer = None
+                self._last_positions.clear()
+                self._reengage(ctx)
+                return BattleOutput()
+
         if elapsed > self.cfg.unstick_oscillate_s:
+            log.info("[battle] UNSTICK — timeout (%.1fs)", elapsed)
             self._unstick_timer = None
             self._last_positions.clear()
             self._reengage(ctx)

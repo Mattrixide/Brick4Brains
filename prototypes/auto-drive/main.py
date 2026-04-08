@@ -219,6 +219,7 @@ class AutoDriveApp:
 
         # Marker size and fallback scale
         self.tracker.set_marker_size(args.marker_size / 10.0)  # mm -> cm
+        print(f"[tracker] Marker ID={args.marker_id}, size={args.marker_size}mm")
         self.tracker.set_scale(args.px_per_cm)
 
         # Generate ChArUco board image for printing
@@ -756,6 +757,18 @@ class AutoDriveApp:
             if ' ' in keys:
                 if self.mode == MODE_READY:
                     self._start_battle()
+            if 't' in keys:
+                if not self._pit_calibrating:
+                    self._pit_calibrating = True
+                    self._pit_corner1_px = None
+                    self._pit_corner1_cm = None
+                    print("[trap] Click the FIRST corner of the trap/pit in the CV window")
+                    self._say("Set trap. Click first corner.")
+                else:
+                    self._pit_calibrating = False
+                    self._pit_corner1_px = None
+                    self._pit_corner1_cm = None
+                    print("[trap] Trap calibration cancelled")
             if 'r' in keys:
                 frame = self.camera.read() if self.camera else None
                 if frame is not None:
@@ -1208,12 +1221,16 @@ class AutoDriveApp:
                                 output.target_speed,
                                 output.buttons,
                             )
+                            self._last_omega_dps = output.target_omega_dps
+                            self._last_rate_speed = output.target_speed
                             throttle = output.target_speed
                             steering = output.target_omega_dps / 300.0
                             buttons = output.buttons
                             self._rate_mode_active = True
                         else:
                             # Legacy direct mode
+                            self._last_omega_dps = 0.0
+                            self._last_rate_speed = 0.0
                             throttle = output.throttle
                             steering = output.steering
                             buttons = output.buttons
@@ -1416,6 +1433,13 @@ class AutoDriveApp:
                     # Enemy heading method + confidence
                     "ehm": self._enemy_tracker.heading_method,
                     "ehc": round(self._enemy_tracker.heading_confidence, 2),
+                    # Debug: raw rate mode values
+                    "omega": round(getattr(self, '_last_omega_dps', 0.0), 1),
+                    "spd": round(getattr(self, '_last_rate_speed', 0.0), 2),
+                    # Debug: enemy tracker internals
+                    "efl": self._enemy_tracker.kalman.frames_without_detection,
+                    # Debug: state machine internals
+                    **self._battle_controller.debug_info,
                 }
                 self._frame_log_file.write(json.dumps(rec, separators=(",", ":")) + "\n")
                 self._frame_count += 1

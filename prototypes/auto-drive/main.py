@@ -636,16 +636,27 @@ class AutoDriveApp:
 
     def _run_loop(self):
         """Core loop: track, decide, act."""
+        # Per-frame timing profiler
+        self._prof = {"cam": 0, "aruco": 0, "enemy": 0, "logic": 0, "render": 0, "log": 0, "total": 0}
+        self._prof_count = 0
+        self._prof_print_t = 0.0
+
         while self.running:
             now = time.perf_counter()
             dt = now - self._last_update
             self._last_update = now
+            _t0 = time.perf_counter()
 
             # 1. Read camera and track
+            _tc = time.perf_counter()
             frame = self.camera.read()
+            _t_cam = time.perf_counter() - _tc
+
+            _ta = time.perf_counter()
             pose = None
             if frame is not None:
                 pose = self.tracker.get_robot_pose(frame, marker_id=self.args.marker_id)
+            _t_aruco = time.perf_counter() - _ta
 
             # 1b. Update sensor fusion with IMU
             if self._imu_poller and self._imu_poller.is_active:
@@ -727,6 +738,7 @@ class AutoDriveApp:
                 self._heading_fusion.update_no_cv()
 
             # 2b. Enemy tracking (run in ALL intercept-related modes)
+            _te = time.perf_counter()
             if frame is not None and self.mode in (MODE_READY, MODE_INTERCEPT, MODE_INTERCEPT_CHARGE, MODE_PIN, MODE_REVERSE, MODE_BATTLE):
                 # Pass ArUco corners for color-based classification (not exclusion mask)
                 our_corners = pose.corners if pose is not None else None
@@ -734,6 +746,7 @@ class AutoDriveApp:
                     frame, our_corners,
                     px_to_cm=self.tracker.px_to_cm,
                 )
+            _t_enemy = time.perf_counter() - _te
 
             # 3. Read controller + keyboard
             ctrl = self.controller.read()
@@ -1438,6 +1451,8 @@ class AutoDriveApp:
                     "spd": round(getattr(self, '_last_rate_speed', 0.0), 2),
                     # Debug: enemy tracker internals
                     "efl": self._enemy_tracker.kalman.frames_without_detection,
+                    # Debug: enemy detector candidates
+                    "ecands": getattr(self._enemy_tracker.detector, '_last_candidates', []),
                     # Debug: state machine internals
                     **self._battle_controller.debug_info,
                 }
@@ -1448,6 +1463,10 @@ class AutoDriveApp:
                 print(f"[log] Frame log closed ({self._frame_count} frames)")
                 self._frame_log_file = None
                 self._frame_count = 0
+
+            # Profiling: accumulate timing
+            _t_logic = time.perf_counter() - _te - _t_enemy  # everything between enemy and here
+            _t_render_start = time.perf_counter()
 
             # 8. Update dashboard state
             self._update_shared_state(
@@ -1737,6 +1756,32 @@ class AutoDriveApp:
                                 self.mode = MODE_INTERCEPT
                                 self.comms.stop()
                                 print("[main] Charge stopped — back to tracking")
+
+            # Profiling: render time + total
+            _t_render = time.perf_counter() - _t_render_start
+            _t_total = time.perf_counter() - _t0
+
+            self._prof["cam"] += _t_cam
+            self._prof["aruco"] += _t_aruco
+            self._prof["enemy"] += _t_enemy
+            self._prof["logic"] += _t_logic
+            self._prof["render"] += _t_render
+            self._prof["total"] += _t_total
+            self._prof_count += 1
+
+            if now - self._prof_print_t >= 3.0 and self._prof_count > 0:
+                n = self._prof_count
+                cam_fps = self.camera.fps if hasattr(self.camera, 'fps') else 0
+                print(f"[perf] loop={1000*self._prof['total']/n:.1f}ms "
+                      f"({n/3:.0f} fps actual, cam={cam_fps:.0f}fps reported) | "
+                      f"cam={1000*self._prof['cam']/n:.1f}ms "
+                      f"aruco={1000*self._prof['aruco']/n:.1f}ms "
+                      f"enemy={1000*self._prof['enemy']/n:.1f}ms "
+                      f"logic={1000*self._prof['logic']/n:.1f}ms "
+                      f"render={1000*self._prof['render']/n:.1f}ms")
+                self._prof = {k: 0 for k in self._prof}
+                self._prof_count = 0
+                self._prof_print_t = now
 
             # 9. FPS tracking
             self._fps_count += 1

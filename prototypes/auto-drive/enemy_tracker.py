@@ -433,6 +433,15 @@ class EnemyDetector:
             result = (scored[0][0], scored[0][1])
             self._last_contour = scored[0][4]
 
+            # Save debug info: all candidates with scores
+            self._last_candidates = [
+                {"px": (round(s[0], 1), round(s[1], 1)), "area": int(s[2]),
+                 "moving": bool(s[3]), "score": round(float(s[5]), 0)}
+                for s in scored[:5]  # top 5
+            ]
+        else:
+            self._last_candidates = []
+
         # Update lock to follow the detection
         if result is not None:
             self._track_lock_px = result
@@ -683,8 +692,8 @@ class EnemyTracker:
                     if self.kalman._initialized:
                         pred = self.kalman.position
                         jump_m = math.sqrt((det_m[0]-pred[0])**2 + (det_m[1]-pred[1])**2)
-                        # Base gate 50cm, widens with missed frames up to 300cm
-                        gate_m = 0.5 + 0.3 * self.kalman.frames_without_detection
+                        # Base gate 100cm, widens with missed frames up to 300cm
+                        gate_m = 1.0 + 0.3 * self.kalman.frames_without_detection
                         gate_m = min(gate_m, 3.0)
                         if jump_m > gate_m:
                             # Too far — but if we've been coasting, reinit filter

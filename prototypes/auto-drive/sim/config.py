@@ -21,8 +21,8 @@ class SimConfig:
     enemy_mass_kg: float = 1.36
 
     # Drive forces (calibrate.py populates these)
-    max_forward_force: float = 400.0
-    max_torque: float = 1500.0
+    max_forward_force: float = 2500.0
+    max_torque: float = 5000.0
     motor_lag_s: float = 0.030        # ESC response lag (~30ms)
 
     # Friction

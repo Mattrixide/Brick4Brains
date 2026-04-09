@@ -692,6 +692,15 @@ function renderFrame(idx) {
   ctx.font = 'bold 11px Consolas, monospace';
   ctx.fillText(state.toUpperCase().replace(/_/g, ' '), sx + 14, sy - 14);
 
+  // Battle state (top center)
+  if (f.mode === 'battle' && state) {
+    ctx.textAlign = 'center';
+    ctx.fillStyle = stateColor(state);
+    ctx.font = 'bold 18px Consolas, monospace';
+    ctx.fillText(state.toUpperCase().replace(/_/g, ' '), cw / 2, 30);
+    ctx.textAlign = 'start';
+  }
+
   // Battle timer (top-right, matching CV window)
   if (f.mr != null && f.mode === 'battle') {
     const rem = f.mr;

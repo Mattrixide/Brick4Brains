@@ -335,9 +335,11 @@ class RobotPositionKF:
         if not self._initialized:
             return
 
-        # Velocity decay during coast
+        # Velocity decay during coast — fast decay so wall-stuck detector works
+        # 0.70: reaches 5 cm/s from 120 in ~15 frames (0.25s)
+        # 0.90 was too slow: took 44 frames (0.7s)
         if self.frames_without_measurement > 0:
-            decay = 0.90
+            decay = 0.70
             self.x[2] *= decay
             self.x[3] *= decay
 

@@ -377,7 +377,7 @@ class ArUcoTracker:
         if use_roi:
             # ROI: full-resolution crop around last known position (~50px marker)
             cx, cy = int(self._last_marker_center[0]), int(self._last_marker_center[1])
-            margin = self._roi_margin  # 200px
+            margin = self._roi_margin  # 300px
             x1 = max(0, cx - margin)
             y1 = max(0, cy - margin)
             x2 = min(w, cx + margin)

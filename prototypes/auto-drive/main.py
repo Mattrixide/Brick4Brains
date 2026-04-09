@@ -355,7 +355,7 @@ class AutoDriveApp:
         self._system_mode = SYSTEM_CONFIG
         self._match_timer.reset()
         self._battle_controller.reset()
-        # (flourish replaced by HSM victory_dance)
+        self._pos_kf.reset()
         self._rate_mode_active = False  # allow direct mode commands again
         self._say("Emergency stop")
         print("[EMERGENCY STOP] All systems halted")
@@ -378,6 +378,7 @@ class AutoDriveApp:
         self._match_timer.reset()
         self._match_timer.start()
         self._pin_timer.reset()
+        self._pos_kf.reset()
         # Don't reset enemy tracker — preserve tracking from ready mode
         self.mode = MODE_BATTLE
         self._battle_start_t = time.perf_counter()

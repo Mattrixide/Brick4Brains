@@ -377,7 +377,9 @@ class RobotPositionKF:
             S_inv = np.linalg.inv(S)
             mahal_dist = float(y.T @ S_inv @ y)
         except np.linalg.LinAlgError:
-            mahal_dist = 0.0
+            # Singular S matrix — skip this measurement entirely
+            self.frames_without_measurement += 1
+            return
 
         if mahal_dist > self._gate_threshold:
             # Measurement rejected as outlier

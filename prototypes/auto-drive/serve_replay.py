@@ -42,6 +42,9 @@ def find_latest_replay():
     # Include battle config for pit data (fallback when arena_json lacks it)
     if os.path.exists(os.path.join(BASE, "battle_config.json")):
         result["battle_config"] = "battle_config.json"
+    # Include floor calibration for arena corners
+    if os.path.exists(os.path.join(BASE, "floor_calibration.json")):
+        result["floor_cal"] = "floor_calibration.json"
 
     return result
 
@@ -101,6 +104,12 @@ class ReplayHandler(http.server.SimpleHTTPRequestHandler):
       const bcResp = await fetch('/' + info.battle_config);
       const bcBlob = await bcResp.blob();
       files.push(new File([bcBlob], 'battle_config.json', {type: 'application/json'}));
+    }
+    // Load floor calibration for arena corners
+    if (info.floor_cal) {
+      const fcResp = await fetch('/' + info.floor_cal);
+      const fcBlob = await fcResp.blob();
+      files.push(new File([fcBlob], 'floor_calibration.json', {type: 'application/json'}));
     }
 
     console.log('Auto-loading', files.length, 'files:', files.map(f => f.name));

@@ -1424,6 +1424,18 @@ class AutoDriveApp:
                     frame_shape = frame.shape if frame is not None else (720, 1280)
                     arena_meta["frame_w"] = int(frame_shape[1]) if len(frame_shape) > 1 else 1280
                     arena_meta["frame_h"] = int(frame_shape[0])
+                    # Include arena corners from floor calibration
+                    floor_cal_path = os.path.join(
+                        os.path.dirname(os.path.abspath(__file__)),
+                        "floor_calibration.json"
+                    )
+                    if os.path.exists(floor_cal_path):
+                        with open(floor_cal_path) as fcf:
+                            floor_cal = json.load(fcf)
+                        if "corners_ft" in floor_cal:
+                            arena_meta["corners_cm"] = floor_cal["corners_ft"]
+                        if "corners_px" in floor_cal:
+                            arena_meta["corners_px"] = floor_cal["corners_px"]
                     # Include pit data from battle config
                     if hasattr(self, '_battle_config'):
                         bc = self._battle_config

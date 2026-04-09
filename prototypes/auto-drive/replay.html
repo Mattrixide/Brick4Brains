@@ -394,12 +394,13 @@ dropZone.addEventListener('drop', e => {
 
 function loadFiles(fileList) {
   const files = Array.from(fileList);
-  let jsonlFile = null, metaFile = null, imageFile = null, battleConfigFile = null;
+  let jsonlFile = null, metaFile = null, imageFile = null, battleConfigFile = null, floorCalFile = null;
 
   for (const f of files) {
     if (f.name.endsWith('.jsonl')) jsonlFile = f;
     else if (f.name.endsWith('_arena.json') || (f.name.endsWith('.json') && f.name.includes('arena'))) metaFile = f;
     else if (f.name === 'battle_config.json') battleConfigFile = f;
+    else if (f.name === 'floor_calibration.json') floorCalFile = f;
     else if (f.name.endsWith('.png') || f.name.endsWith('.jpg')) imageFile = f;
   }
 
@@ -466,6 +467,19 @@ function loadFiles(fileList) {
     }));
   }
 
+  // Load floor calibration (for arena corners fallback)
+  let floorCal = null;
+  if (floorCalFile) {
+    promises.push(new Promise(resolve => {
+      const r = new FileReader();
+      r.onload = () => {
+        try { floorCal = JSON.parse(r.result); } catch(e) {}
+        resolve();
+      };
+      r.readAsText(floorCalFile);
+    }));
+  }
+
   // Load arena image
   if (imageFile) {
     promises.push(new Promise(resolve => {
@@ -482,6 +496,11 @@ function loadFiles(fileList) {
 
   Promise.all(promises).then(() => {
     if (frames.length === 0) return;
+    // Merge floor calibration corners into arenaMeta if missing
+    if (arenaMeta && floorCal && !arenaMeta.corners_cm) {
+      if (floorCal.corners_ft) arenaMeta.corners_cm = floorCal.corners_ft;
+      if (floorCal.corners_px) arenaMeta.corners_px = floorCal.corners_px;
+    }
     // Merge pit data from battle_config into arenaMeta if missing
     if (arenaMeta && battleConfig && !arenaMeta.pit_x_cm) {
       if (battleConfig.pit_x_cm || battleConfig.pit_y_cm) {
@@ -734,17 +753,28 @@ function drawGrid(cw, ch) {
       }
     }
 
-    // Arena border (green outline at the playing field edge)
-    const border = [
-      w2c(-half, -half), w2c(half, -half), w2c(half, half), w2c(-half, half)
-    ];
-    ctx.strokeStyle = '#00c800';
-    ctx.lineWidth = 2;
-    ctx.beginPath();
-    ctx.moveTo(border[0][0], border[0][1]);
-    for (let i = 1; i < 4; i++) ctx.lineTo(border[i][0], border[i][1]);
-    ctx.closePath();
-    ctx.stroke();
+    // Arena border — use calibrated corners if available, else computed square
+    if (arenaMeta && arenaMeta.corners_cm && arenaMeta.corners_cm.length >= 3) {
+      const corners = arenaMeta.corners_cm.map(c => w2c(c[0], c[1]));
+      ctx.strokeStyle = '#00c800';
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      ctx.moveTo(corners[0][0], corners[0][1]);
+      for (let i = 1; i < corners.length; i++) ctx.lineTo(corners[i][0], corners[i][1]);
+      ctx.closePath();
+      ctx.stroke();
+    } else {
+      const border = [
+        w2c(-half, -half), w2c(half, -half), w2c(half, half), w2c(-half, half)
+      ];
+      ctx.strokeStyle = '#00c800';
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      ctx.moveTo(border[0][0], border[0][1]);
+      for (let i = 1; i < 4; i++) ctx.lineTo(border[i][0], border[i][1]);
+      ctx.closePath();
+      ctx.stroke();
+    }
 
     // Origin crosshair + ORIGIN label
     const [ox, oy] = w2c(0, 0);
@@ -1324,6 +1354,14 @@ resizeCanvas();
         if (r.ok) {
           const blob = await r.blob();
           fileObjects.push(new File([blob], 'battle_config.json', {type: 'application/json'}));
+        }
+      } catch(e) {}
+      // Load floor_calibration.json for arena corners
+      try {
+        const r = await fetch('/floor_calibration.json');
+        if (r.ok) {
+          const blob = await r.blob();
+          fileObjects.push(new File([blob], 'floor_calibration.json', {type: 'application/json'}));
         }
       } catch(e) {}
       if (fileObjects.length > 0) {

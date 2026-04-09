@@ -4,11 +4,29 @@
 
 **Goal:** Build a pymunk-based 2D combat simulator that runs Brick's BattleController against AI or manual enemies, using real arena geometry and physics calibrated from log data.
 
-**Architecture:** SimArena (pymunk physics + pygame rendering) feeds robot state into SimBridge, which packs BattleContext and calls BattleController.tick(). Output forces are applied back to pymunk bodies. Enemy is switchable between keyboard, scripted behaviors, and AI.
+**Architecture:** SimArena (pymunk physics, no rendering) feeds robot state into SimBridge, which packs BattleContext and calls BattleController.tick(). Output forces are applied back to pymunk bodies. SimRenderer handles pygame drawing separately (enables headless testing). SimSession manages match state, speed, logging. Enemy is switchable between keyboard, scripted behaviors, and AI.
 
-**Tech Stack:** Python 3.12, pymunk (Chipmunk2D), pygame, existing battle code (state_machine.py, battle_config.py, match_timer.py)
+**Tech Stack:** Python 3.12, pymunk (Chipmunk2D), pygame, scipy (calibration), existing battle code (state_machine.py, battle_config.py, match_timer.py)
 
 **Spec:** `docs/superpowers/specs/2026-04-09-combat-simulator-design.md`
+
+**Expert review fixes incorporated:**
+- Friction: forces before substeps, damping after (pymunk expert)
+- Rate mode torque clamped to [-MAX_TORQUE, MAX_TORQUE] (pymunk expert)
+- Default forces reduced from 2000→400N (pymunk expert)
+- MatchTimer constructed with all 4 args (battle code expert)
+- SimBridge computes accel_x/y_mg from velocity delta (battle code expert)
+- sys.path fixed: single dirname for auto-drive/ (battle code expert)
+- flee mode mapped to key 6 (battle code expert)
+- SimLogger writes ab, fp, ehm, ehc, ax, ay fields (replay expert)
+- Arena meta includes pit_danger_radius_cm (replay expert)
+- Config as JSON dataclass, not module constants (arch expert)
+- Rendering separated from arena physics (arch expert)
+- SimSession extracted from run.py (arch expert)
+- SimBridge takes robots, not arena (arch expert)
+- Calibration uses raw position diffs, not KF velocity (calibration expert)
+- Calibration uses least-squares fit of full dynamics model (calibration expert)
+- Motor response lag modeled as first-order filter (calibration expert)
 
 ---
 
@@ -17,12 +35,14 @@
 ```
 prototypes/auto-drive/sim/
   __init__.py       # Empty, makes sim a package
-  config.py         # Physics constants + robot dimensions
-  arena.py          # SimArena: pymunk world, walls, pit, robot bodies, rendering
+  config.py         # SimConfig dataclass + defaults, loads/saves sim_config.json
+  arena.py          # SimArena: pymunk world, walls, pit, robot bodies (no rendering)
+  renderer.py       # SimRenderer: pygame drawing, separated for headless testing
   bridge.py         # SimBridge: BattleContext packing, force application
   enemy_ai.py       # EnemyController: manual, scripted, AI modes
-  run.py            # Main entry point: pygame loop, controls, logging
-  calibrate.py      # Analyze real logs to extract physics parameters
+  session.py        # SimSession: match state, speed, logging orchestration
+  run.py            # Main entry point: thin pygame event loop
+  calibrate.py      # Analyze real logs via least-squares fit
 ```
 
 **Existing files referenced (read-only, no modifications):**
@@ -51,45 +71,68 @@ prototypes/auto-drive/sim/
 
 ```python
 # sim/config.py
-"""Tunable physics parameters for the combat simulator."""
-import math
+"""Tunable physics parameters for the combat simulator.
+Runtime config loads from sim_config.json; these are defaults."""
+import json
+import os
+from dataclasses import dataclass, field, asdict
 
-# --- Arena ---
-ARENA_CM = 244.0  # 8ft = 244cm
+@dataclass
+class SimConfig:
+    # Arena
+    arena_cm: float = 244.0
 
-# --- Robot dimensions (inches to cm) ---
-BRICK_WIDTH_CM = 9 * 2.54     # 22.86cm side-to-side
-BRICK_DEPTH_CM = 7 * 2.54     # 17.78cm front-to-back
-ENEMY_WIDTH_CM = 6 * 2.54     # 15.24cm side-to-side
-ENEMY_DEPTH_CM = 9 * 2.54     # 22.86cm front-to-back
+    # Robot dimensions (inches to cm)
+    brick_width_cm: float = 22.86     # 9 inches
+    brick_depth_cm: float = 17.78     # 7 inches
+    enemy_width_cm: float = 15.24     # 6 inches
+    enemy_depth_cm: float = 22.86     # 9 inches
 
-# --- Masses ---
-BRICK_MASS_KG = 1.36          # 3lb beetleweight limit
-ENEMY_MASS_KG = 1.36
+    # Masses
+    brick_mass_kg: float = 1.36       # 3lb beetleweight
+    enemy_mass_kg: float = 1.36
 
-# --- Drive forces ---
-MAX_FORWARD_FORCE = 2000.0    # Newtons (cm/s^2 * kg effectively)
-MAX_TORQUE = 4000.0           # torque units
+    # Drive forces (calibrate.py populates these)
+    max_forward_force: float = 400.0  # reduced from 2000 per expert review
+    max_torque: float = 1500.0
+    motor_lag_s: float = 0.030        # ESC response lag (~30ms)
 
-# --- Friction ---
-GROUND_FRICTION_MU = 0.6     # Coulomb friction coefficient (rubber on plywood)
-LATERAL_DAMPING = 0.85        # per-frame lateral velocity retention (0=no slide, 1=ice)
-ANGULAR_DAMPING = 0.93        # per-frame angular velocity retention
-GRAVITY_CMS2 = 980.0          # g in cm/s^2 (for friction force calculation)
+    # Friction
+    ground_friction_mu: float = 0.6   # rubber on plywood
+    lateral_damping: float = 0.85     # per-frame lateral velocity retention
+    angular_damping: float = 0.93     # per-frame angular velocity retention
+    gravity_cms2: float = 980.0       # g in cm/s^2
 
-# --- Collision ---
-WALL_ELASTICITY = 0.2
-WALL_FRICTION = 1.0
-ROBOT_ELASTICITY = 0.3
-ROBOT_FRICTION = 0.8
+    # Collision
+    wall_elasticity: float = 0.2
+    wall_friction: float = 1.0
+    robot_elasticity: float = 0.3
+    robot_friction: float = 0.8
 
-# --- Simulation ---
-PHYSICS_FPS = 240             # pymunk substeps per second (4 substeps at 60fps)
-RENDER_FPS = 60
-SCALE_PX_PER_CM = 2.5         # rendering scale
+    # Simulation
+    physics_fps: int = 240            # substeps per second
+    render_fps: int = 60
+    scale_px_per_cm: float = 2.5
 
-# --- Pit ---
-PIT_ELIMINATION = True        # robots in pit are frozen/eliminated
+    # Pit
+    pit_elimination: bool = True
+
+    def save(self, path=None):
+        if path is None:
+            path = os.path.join(os.path.dirname(__file__), "sim_config.json")
+        with open(path, "w") as f:
+            json.dump(asdict(self), f, indent=2)
+
+    @classmethod
+    def load(cls, path=None):
+        if path is None:
+            path = os.path.join(os.path.dirname(__file__), "sim_config.json")
+        try:
+            with open(path) as f:
+                data = json.load(f)
+            return cls(**{k: v for k, v in data.items() if k in cls.__dataclass_fields__})
+        except (FileNotFoundError, json.JSONDecodeError):
+            return cls()
 ```
 
 - [ ] **Step 2: Commit**
@@ -180,35 +223,47 @@ class SimRobot:
         self.body.apply_force_at_local_point((throttle * C.MAX_FORWARD_FORCE, 0), (0, 0))
         self.body.torque = steering * C.MAX_TORQUE
 
-    def apply_ground_friction(self):
-        """Simulate ground friction for top-down view."""
+    def apply_friction_forces(self, cfg):
+        """Apply Coulomb friction FORCE (call BEFORE substeps)."""
         if not self.alive:
             return
         vx, vy = self.body.velocity
         speed = math.hypot(vx, vy)
-        friction_force = C.GROUND_FRICTION_MU * self.mass * C.GRAVITY_CMS2
+        friction_force = cfg.ground_friction_mu * self.mass * cfg.gravity_cms2
 
-        # Coulomb friction opposing velocity
         if speed > 1.0:
-            fx = -vx / speed * friction_force
-            fy = -vy / speed * friction_force
+            # Decompose into forward/lateral and apply friction along forward only
+            cos_a = math.cos(self.body.angle)
+            sin_a = math.sin(self.body.angle)
+            v_fwd = vx * cos_a + vy * sin_a
+            fwd_sign = -1.0 if v_fwd > 0 else 1.0 if v_fwd < 0 else 0.0
+            fx = cos_a * fwd_sign * friction_force
+            fy = sin_a * fwd_sign * friction_force
             self.body.apply_force_at_world_point((fx, fy), self.body.position)
-        else:
-            self.body.velocity = (vx * 0.8, vy * 0.8)
 
-        # Lateral damping (robots resist sideways sliding)
-        cos_a = math.cos(self.body.angle)
-        sin_a = math.sin(self.body.angle)
-        v_fwd = vx * cos_a + vy * sin_a
-        v_lat = -vx * sin_a + vy * cos_a
-        v_lat *= C.LATERAL_DAMPING
-        self.body.velocity = (
-            v_fwd * cos_a - v_lat * sin_a,
-            v_fwd * sin_a + v_lat * cos_a,
-        )
+    def apply_velocity_damping(self, cfg):
+        """Apply lateral + angular damping (call AFTER substeps)."""
+        if not self.alive:
+            return
+        vx, vy = self.body.velocity
+        speed = math.hypot(vx, vy)
+
+        if speed < 1.0:
+            self.body.velocity = (vx * 0.8, vy * 0.8)
+        else:
+            # Lateral damping (robots resist sideways sliding)
+            cos_a = math.cos(self.body.angle)
+            sin_a = math.sin(self.body.angle)
+            v_fwd = vx * cos_a + vy * sin_a
+            v_lat = -vx * sin_a + vy * cos_a
+            v_lat *= cfg.lateral_damping
+            self.body.velocity = (
+                v_fwd * cos_a - v_lat * sin_a,
+                v_fwd * sin_a + v_lat * cos_a,
+            )
 
         # Angular damping
-        self.body.angular_velocity *= C.ANGULAR_DAMPING
+        self.body.angular_velocity *= cfg.angular_damping
 
     def get_corners_world(self):
         """Get 4 corners in world cm coords."""
@@ -327,101 +382,26 @@ class SimArena:
 
     def step(self, dt=1/60):
         """Step physics one frame."""
-        self.brick.apply_ground_friction()
-        self.enemy.apply_ground_friction()
-        substeps = C.PHYSICS_FPS // C.RENDER_FPS
+        # Forces BEFORE substeps
+        self.brick.apply_friction_forces(self.cfg)
+        self.enemy.apply_friction_forces(self.cfg)
+        # Substeps
+        substeps = self.cfg.physics_fps // self.cfg.render_fps
         sub_dt = dt / substeps
         for _ in range(substeps):
             self.space.step(sub_dt)
+        # Damping AFTER substeps (so solver doesn't overwrite)
+        self.brick.apply_velocity_damping(self.cfg)
+        self.enemy.apply_velocity_damping(self.cfg)
 
     def reset(self):
         """Reset robots to starting positions."""
         self.brick.reset(-40, 0, 0)
         self.enemy.reset(40, 0, 180)
 
-    # -- Rendering ----------------------------------------------------------
-
-    def draw(self, screen):
-        """Draw arena, grid, pit, robots."""
-        cw, ch = screen.get_size()
-        ox, oy = cw / 2, ch / 2  # screen center
-
-        def cm_to_px(x, y):
-            return (int(x * C.SCALE_PX_PER_CM + ox),
-                    int(-y * C.SCALE_PX_PER_CM + oy))
-
-        # Grid (30cm, clipped to arena bounding box)
-        corners = self.arena_corners
-        xs = [c[0] for c in corners]
-        ys = [c[1] for c in corners]
-        min_x, max_x = min(xs), max(xs)
-        min_y, max_y = min(ys), max(ys)
-        cx_arena = (min_x + max_x) / 2
-        cy_arena = (min_y + max_y) / 2
-        step = 30
-        gx0 = cx_arena - math.ceil((cx_arena - min_x) / step) * step
-        gy0 = cy_arena - math.ceil((cy_arena - min_y) / step) * step
-        gx1 = cx_arena + math.ceil((max_x - cx_arena) / step) * step
-        gy1 = cy_arena + math.ceil((max_y - cy_arena) / step) * step
-
-        for x in _frange(gx0, gx1, step):
-            p1 = cm_to_px(x, min_y - 10)
-            p2 = cm_to_px(x, max_y + 10)
-            pygame.draw.line(screen, (0, 60, 0), p1, p2, 1)
-        for y in _frange(gy0, gy1, step):
-            p1 = cm_to_px(min_x - 10, y)
-            p2 = cm_to_px(max_x + 10, y)
-            pygame.draw.line(screen, (0, 60, 0), p1, p2, 1)
-
-        # Arena border
-        border_pts = [cm_to_px(c[0], c[1]) for c in corners]
-        pygame.draw.polygon(screen, (0, 180, 0), border_pts, 2)
-
-        # Center crosshair
-        ccx, ccy = cm_to_px(cx_arena, cy_arena)
-        pygame.draw.line(screen, (0, 255, 0), (ccx - 10, ccy), (ccx + 10, ccy), 2)
-        pygame.draw.line(screen, (0, 255, 0), (ccx, ccy - 10), (ccx, ccy + 10), 2)
-
-        # Pit
-        if self.pit_radius > 0:
-            r = self.pit_radius
-            pit_corners = [
-                cm_to_px(self.pit_x - r, self.pit_y - r),
-                cm_to_px(self.pit_x + r, self.pit_y - r),
-                cm_to_px(self.pit_x + r, self.pit_y + r),
-                cm_to_px(self.pit_x - r, self.pit_y + r),
-            ]
-            pygame.draw.polygon(screen, (200, 0, 0), pit_corners, 2)
-            px, py = cm_to_px(self.pit_x, self.pit_y)
-            font = pygame.font.SysFont("consolas", 12)
-            screen.blit(font.render("PIT", True, (200, 0, 0)), (px - 10, py - 6))
-
-        # Robots
-        self._draw_robot(screen, self.brick, (0, 180, 0), cm_to_px)
-        self._draw_robot(screen, self.enemy, (180, 0, 0), cm_to_px)
-
-    def _draw_robot(self, screen, robot, color, cm_to_px):
-        if not robot.alive:
-            color = (80, 80, 80)
-        corners = robot.get_corners_world()
-        pts = [cm_to_px(cx, cy) for cx, cy in corners]
-        pygame.draw.polygon(screen, color, pts)
-        pygame.draw.polygon(screen, (255, 255, 255), pts, 2)
-        # Heading indicator
-        cx, cy = cm_to_px(*robot.position)
-        fx = robot.position[0] + math.cos(robot.heading_rad) * robot.depth / 2 * 1.3
-        fy = robot.position[1] + math.sin(robot.heading_rad) * robot.depth / 2 * 1.3
-        fpx, fpy = cm_to_px(fx, fy)
-        pygame.draw.line(screen, (255, 255, 255), (cx, cy), (fpx, fpy), 2)
-
-
-def _frange(start, stop, step):
-    """Float range generator."""
-    v = start
-    while v <= stop + 0.001:
-        yield v
-        v += step
 ```
+
+Then create `sim/renderer.py` with all the drawing code (grid, arena border, pit, robots, HUD). The renderer takes a `SimArena` reference and a pygame screen, keeping rendering fully separated from physics. This enables headless testing of the physics layer.
 
 - [ ] **Step 2: Commit**
 
@@ -449,8 +429,8 @@ import math
 import sys
 import os
 
-# Ensure auto-drive is on the path for imports
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+# Ensure auto-drive is on the path for battle code imports
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import pygame
 
@@ -775,9 +755,8 @@ class SimBridge:
     """Packs pymunk state into BattleContext, feeds BattleController,
     applies output as forces."""
 
-    def __init__(self, robot: SimRobot, arena: SimArena, config_path=None):
+    def __init__(self, robot: SimRobot, config_path=None):
         self.robot = robot
-        self.arena = arena
 
         # Load battle config
         if config_path is None:
@@ -789,12 +768,16 @@ class SimBridge:
         self.match_timer = MatchTimer(
             self.battle_config.match_duration_s,
             self.battle_config.urgency_ramp_start_s,
+            self.battle_config.phase_start_s,
+            self.battle_config.phase_final_s,
         )
         self.pin_timer = PinTimer(self.battle_config.pin_duration_s)
         self.controller = BattleController(
             self.battle_config, self.match_timer, self.pin_timer
         )
         self._last_output = BattleOutput()
+        self._prev_vx = 0.0
+        self._prev_vy = 0.0
 
     def start_match(self):
         """Start the match timer."""
@@ -830,6 +813,13 @@ class SimBridge:
         enemy_alive = enemy.alive
         dist = math.hypot(ex - ox, ey - oy) if enemy_alive else 999.0
 
+        # Compute acceleration from velocity delta (enables impact detection)
+        accel_x_cms2 = (ovx - self._prev_vx) / dt if dt > 0 else 0
+        accel_y_cms2 = (ovy - self._prev_vy) / dt if dt > 0 else 0
+        accel_x_mg = accel_x_cms2 / 0.98  # cm/s^2 to milligravity
+        accel_y_mg = accel_y_cms2 / 0.98
+        self._prev_vx, self._prev_vy = ovx, ovy
+
         ctx = BattleContext(
             our_pos=(ox, oy),
             our_heading_rad=self.robot.heading_rad,
@@ -843,8 +833,8 @@ class SimBridge:
             distance_cm=dist,
             dt=dt,
             our_detected=True,  # always visible in sim
-            accel_x_mg=0.0,
-            accel_y_mg=0.0,
+            accel_x_mg=accel_x_mg,
+            accel_y_mg=accel_y_mg,
             throttle_cmd=self._last_output.throttle,
         )
 
@@ -853,14 +843,15 @@ class SimBridge:
 
         # Apply output to pymunk body
         if output.target_omega_dps is not None:
-            # Rate mode: apply torque to reach target angular velocity
+            # Rate mode: P-controller for angular velocity, clamped
             target_omega_rad = math.radians(output.target_omega_dps)
             current_omega = self.robot.angular_velocity
             omega_error = target_omega_rad - current_omega
-            # P-controller for angular velocity
-            self.robot.body.torque = omega_error * C.MAX_TORQUE * 0.5
+            torque = max(-self.cfg.max_torque, min(self.cfg.max_torque,
+                         omega_error * self.cfg.max_torque * 0.5))
+            self.robot.body.torque = torque
             self.robot.body.apply_force_at_local_point(
-                (output.target_speed * C.MAX_FORWARD_FORCE, 0), (0, 0)
+                (output.target_speed * self.cfg.max_forward_force, 0), (0, 0)
             )
         else:
             # Direct mode
@@ -1028,9 +1019,9 @@ from sim.enemy_ai import EnemyController
 enemy_ctrl = EnemyController()
 
 # In event handling:
-elif event.key in (pygame.K_1, pygame.K_2, pygame.K_3, pygame.K_4, pygame.K_5):
+elif event.key in (pygame.K_1, pygame.K_2, pygame.K_3, pygame.K_4, pygame.K_5, pygame.K_6):
     modes = {pygame.K_1: "manual", pygame.K_2: "sit", pygame.K_3: "circle",
-             pygame.K_4: "charge", pygame.K_5: "ai"}
+             pygame.K_4: "charge", pygame.K_5: "flee", pygame.K_6: "ai"}
     enemy_ctrl.set_mode(modes[event.key])
 
 # Replace enemy drive section:
@@ -1129,6 +1120,7 @@ class SimLogger:
             meta["pit_x_cm"] = arena.pit_x
             meta["pit_y_cm"] = arena.pit_y
             meta["pit_radius_cm"] = arena.pit_radius
+            meta["pit_danger_radius_cm"] = arena.pit_radius + 15
         with open(meta_path, "w") as f:
             json.dump(meta, f, indent=2)
 
@@ -1151,6 +1143,10 @@ class SimLogger:
         urg = self.bridge.match_timer.urgency if self.bridge and self.bridge.match_timer.is_running else None
         mp = self.bridge.match_timer.phase if self.bridge and self.bridge.match_timer.is_running else None
 
+        # Robot polygons for replay (ArUco box + footprint from pymunk vertices)
+        ab = [[round(c[0], 1), round(c[1], 1)] for c in b.get_corners_world()]
+        fp = ab  # footprint = same as body shape in sim
+
         rec = {
             "f": self.frame_count,
             "t": round(time.perf_counter() - self.start_time, 4),
@@ -1167,11 +1163,16 @@ class SimLogger:
             "evx": round(evx, 1) if e.alive else None,
             "evy": round(evy, 1) if e.alive else None,
             "ed": e.alive, "et": e.alive,
+            "edx": round(ex, 1) if e.alive else None,
+            "edy": round(ey, 1) if e.alive else None,
             "dist": round(dist, 1),
             "thr": round(thr, 3), "str": round(steer, 3),
             "mr": round(mr, 1) if mr is not None else None,
             "urg": round(urg, 3) if urg is not None else None,
             "fps": round(1/dt, 1) if dt > 0 else 60.0,
+            "ab": ab, "fp": fp,
+            "ehm": "velocity", "ehc": 1.0,
+            "ax": None, "ay": None,
         }
         self.file.write(json.dumps(rec) + "\n")
         self.frame_count += 1

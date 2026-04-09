@@ -1611,16 +1611,19 @@ class AutoDriveApp:
                             sc = state_colors.get(bstate, (200, 200, 200))
                             cv2.putText(stream_frame, bstate.upper().replace("_", " "),
                                         (10, 90), cv2.FONT_HERSHEY_SIMPLEX, 0.6, sc, 2)
-                            # Match timer
+                            # Match timer — large and visible
                             rem = self._match_timer.remaining_s
                             mins = int(rem) // 60
                             secs = int(rem) % 60
-                            timer_text = f"Match: {mins}:{secs:02d}"
+                            timer_text = f"{mins}:{secs:02d}"
                             urg = self._match_timer.urgency
+                            phase = self._match_timer.phase
                             urg_color = (0, 255, 255) if urg < 0.5 else (0, 165, 255) if urg < 0.8 else (0, 0, 255)
-                            cv2.putText(stream_frame, timer_text, (10, 120),
-                                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, urg_color, 1)
-                            cv2.putText(stream_frame, f"Urgency: {urg:.0%}", (180, 120),
+                            # Big timer top-right
+                            h_f, w_f = stream_frame.shape[:2]
+                            cv2.putText(stream_frame, timer_text, (w_f - 160, 40),
+                                        cv2.FONT_HERSHEY_SIMPLEX, 1.2, urg_color, 3)
+                            cv2.putText(stream_frame, phase.upper(), (w_f - 160, 65),
                                         cv2.FONT_HERSHEY_SIMPLEX, 0.5, urg_color, 1)
                         else:
                             # Old pursuit FSM state for legacy modes

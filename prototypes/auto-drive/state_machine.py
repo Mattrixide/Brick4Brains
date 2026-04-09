@@ -332,12 +332,11 @@ class BattleController:
                         return self._dead_reckon_reverse(ctx, now)
 
             # Enemy lost → lost_target (from combat states — cheap check)
-            # Pin uses longer threshold (enemy hidden under us during pin)
+            # Pin excluded: enemy hidden under us during pin is expected, pin timer handles exit
             if current in ("charge_pursue", "charge_flank",
-                           "charge_reorient", "pin",
+                           "charge_reorient",
                            "pit_position", "pit_push"):
-                lost_threshold = 150 if current == "pin" else 30
-                if not ctx.enemy_detected and ctx.frames_without_detection > lost_threshold:
+                if not ctx.enemy_detected and ctx.frames_without_detection > 30:
                     self._enter_lost_target(now)
                     return self._action_lost_target(ctx, now)
 
@@ -793,19 +792,19 @@ class BattleController:
 
     def _action_pin(self, ctx: BattleContext, now: float) -> BattleOutput:
         """Hold enemy against wall with low forward pressure."""
-        # Pin timer expired → short back-off then re-engage
+        # Pin timer expired → back up to re-acquire ArUco
         if self.pin_timer.is_expired:
             self.pin_timer.reset()
+            # Always retreat after pin — this backs us away from the wall
+            # so ArUco becomes visible again (marker was obscured during pin)
             self._enter_retreat(reason="pin_release")
             return self._action_evade_retreat(ctx, now)
 
-        # ArUco lost safety valve — 4s (pin timer at 5s fires first in normal case)
-        if self._aruco_lost_frames > 240:
-            self.pin_timer.reset()
-            self._enter_retreat(reason="aruco_lost")
-            return self._action_evade_retreat(ctx, now)
+        # NO ArUco-loss exit during pin — ArUco loss is EXPECTED
+        # (marker pressed against wall/opponent). Pin timer is the only timeout.
 
-        # Enemy escaped? (0.5s grace period after pin entry to avoid bounce oscillation)
+        # Enemy escaped? Only check if BOTH ArUco and enemy are visible
+        # (0.5s grace period after pin entry to avoid bounce oscillation)
         pin_elapsed = now - self._pin_entry_time
         if (pin_elapsed > 0.5
                 and ctx.enemy_tracking and ctx.our_detected
@@ -1157,12 +1156,20 @@ class BattleController:
     # -- Lost ArUco action --------------------------------------------------
 
     def _action_lost_aruco(self, ctx: BattleContext, now: float) -> BattleOutput:
-        """Own position lost for too long — motors off, wait for re-acquisition."""
+        """Own position lost — slow reverse to back away from wall/obstacle.
+
+        Most common cause: marker pressed against wall during pin.
+        Reversing at low speed helps re-expose the marker to the camera.
+        """
         # ArUco re-acquired → snap back to normal
         if ctx.our_detected:
+            log.info("[battle] LOST ARUCO — re-acquired, re-engaging")
             self._reengage(ctx)
             return BattleOutput()
-        return BattleOutput()
+
+        # Slow reverse using IMU heading hold (straight back)
+        # This backs us away from the wall that's blocking the marker
+        return BattleOutput(target_omega_dps=0.0, target_speed=-0.2)
 
     # -- Victory dance action -----------------------------------------------
 

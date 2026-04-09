@@ -46,37 +46,36 @@ def main():
                     arena.reset()
                     paused = True
 
-        # --- Input (every frame, even when paused) ---
-        keys = pygame.key.get_pressed()
-
-        # Brick: WASD
-        brick_throttle = 0.0
-        brick_steering = 0.0
-        if keys[pygame.K_w]:
-            brick_throttle = 1.0
-        elif keys[pygame.K_s]:
-            brick_throttle = -1.0
-        if keys[pygame.K_a]:
-            brick_steering = 1.0
-        elif keys[pygame.K_d]:
-            brick_steering = -1.0
-        arena.brick.apply_drive(brick_throttle, brick_steering, arena.cfg)
-
-        # Enemy: Arrow keys
-        enemy_throttle = 0.0
-        enemy_steering = 0.0
-        if keys[pygame.K_UP]:
-            enemy_throttle = 1.0
-        elif keys[pygame.K_DOWN]:
-            enemy_throttle = -1.0
-        if keys[pygame.K_LEFT]:
-            enemy_steering = 1.0
-        elif keys[pygame.K_RIGHT]:
-            enemy_steering = -1.0
-        arena.enemy.apply_drive(enemy_throttle, enemy_steering, arena.cfg)
-
-        # --- Physics ---
+        # --- Input + Physics (only when running) ---
         if not paused:
+            keys = pygame.key.get_pressed()
+
+            # Brick: WASD
+            brick_throttle = 0.0
+            brick_steering = 0.0
+            if keys[pygame.K_w]:
+                brick_throttle = 1.0
+            elif keys[pygame.K_s]:
+                brick_throttle = -1.0
+            if keys[pygame.K_a]:
+                brick_steering = 1.0
+            elif keys[pygame.K_d]:
+                brick_steering = -1.0
+            arena.brick.apply_drive(brick_throttle, brick_steering, arena.cfg)
+
+            # Enemy: Arrow keys
+            enemy_throttle = 0.0
+            enemy_steering = 0.0
+            if keys[pygame.K_UP]:
+                enemy_throttle = 1.0
+            elif keys[pygame.K_DOWN]:
+                enemy_throttle = -1.0
+            if keys[pygame.K_LEFT]:
+                enemy_steering = 1.0
+            elif keys[pygame.K_RIGHT]:
+                enemy_steering = -1.0
+            arena.enemy.apply_drive(enemy_throttle, enemy_steering, arena.cfg)
+
             arena.step()
 
         # --- Render ---

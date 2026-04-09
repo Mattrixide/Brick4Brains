@@ -1160,10 +1160,11 @@ class BattleController:
     # -- Lost ArUco action --------------------------------------------------
 
     def _action_lost_aruco(self, ctx: BattleContext, now: float) -> BattleOutput:
-        """Own position lost — oscillate to break free from wall, then reverse.
+        """Own position lost — reverse straight back until ArUco is visible.
 
         Most common cause: marker pressed against wall during pin.
-        Oscillating breaks free if wedged, reversing re-exposes the marker.
+        Driving forward would push back into the wall and hide the marker more.
+        Reverse pulls away from the wall to re-expose it.
         """
         # ArUco re-acquired → snap back to normal
         if ctx.our_detected:
@@ -1171,14 +1172,8 @@ class BattleController:
             self._reengage(ctx)
             return BattleOutput()
 
-        # Oscillate forward/reverse every 0.4s to break free if wedged
-        # (same principle as unstick but without position-based exit)
-        if now - self._lost_aruco_t > 0.4:
-            self._lost_aruco_phase *= -1
-            self._lost_aruco_t = now
-
-        speed = 0.3 * self._lost_aruco_phase
-        return BattleOutput(target_omega_dps=0.0, target_speed=speed)
+        # Reverse straight back using gyro heading hold
+        return BattleOutput(target_omega_dps=0.0, target_speed=-0.3)
 
     # -- Victory dance action -----------------------------------------------
 

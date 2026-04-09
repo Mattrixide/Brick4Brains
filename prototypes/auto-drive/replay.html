@@ -748,12 +748,6 @@ function renderFrame(idx) {
       // PINNING label
       ctx.font = 'bold 28px Consolas, monospace';
       ctx.fillText('PINNING', cw / 2, ch / 2 - 50);
-      // Phase below
-      if (phase) {
-        ctx.font = 'bold 16px Consolas, monospace';
-        ctx.fillStyle = phaseColor(phase);
-        ctx.fillText(phase.toUpperCase(), cw / 2, ch / 2 + 45);
-      }
     }
 
     ctx.textAlign = 'start';

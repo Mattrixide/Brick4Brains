@@ -348,11 +348,11 @@ class BattleController:
                     return self._action_lost_target(ctx, now)
 
             # Stuck at wall — robot at wall with near-zero speed, not moving
-            # Catches cases where stall detector misses (no speed drop, just sustained zero)
+            # Uses min-of-3 speed (filters phantom velocity spikes from ArUco jitter)
             if (current not in ("unstick", "evade_retreat", "evade_reposition", "wall_reverse", "pin")
                     and ctx.our_detected
                     and _near_wall(ctx.our_pos[0], ctx.our_pos[1], self.cfg.wall_threshold_cm)
-                    and self._speed_t0 < 5.0 and self._speed_t1 < 5.0
+                    and min(self._speed_t0, self._speed_t1, self._speed_t2) < 5.0
                     and abs(ctx.throttle_cmd) > 0.2):
                 self._wall_stuck_frames += 1
                 if self._wall_stuck_frames > 30:  # ~0.5s stuck at wall

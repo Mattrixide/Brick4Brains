@@ -249,19 +249,17 @@ class SimArena:
 
         # Collision handler: robot (1) vs pit (2)
         if self.cfg.pit_elimination:
-            handler = self.space.add_collision_handler(1, 2)
-
             def _pit_begin(arbiter, space, data):
-                # Find which robot fell in and freeze it
                 for shape in arbiter.shapes:
                     if shape.collision_type == 1:
-                        # Find the robot that owns this shape
                         for robot in (self.brick, self.enemy):
                             if robot.shape is shape:
                                 robot.freeze()
-                return False
 
-            handler.begin = _pit_begin
+            self.space.on_collision(
+                collision_type_a=1, collision_type_b=2,
+                begin=_pit_begin,
+            )
 
     def step(self, dt=None):
         """Advance physics by one render frame."""

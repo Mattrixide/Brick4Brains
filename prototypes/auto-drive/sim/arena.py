@@ -230,15 +230,15 @@ class SimArena:
             self.space.add(seg)
 
     def _create_pit(self):
-        """Create a circular pit sensor using a polygon approximation."""
+        """Create a square pit sensor (matches real pit from 't' calibration)."""
         cx, cy = self.pit_center
-        r = self.pit_radius
-        # Approximate circle with 16 segments
-        num_pts = 16
-        vertices = []
-        for i in range(num_pts):
-            angle = 2 * math.pi * i / num_pts
-            vertices.append((cx + r * math.cos(angle), cy + r * math.sin(angle)))
+        r = self.pit_radius  # half-width of the square
+        vertices = [
+            (cx - r, cy - r),
+            (cx + r, cy - r),
+            (cx + r, cy + r),
+            (cx - r, cy + r),
+        ]
 
         pit_body = self.space.static_body
         pit_shape = pymunk.Poly(pit_body, vertices)

@@ -118,18 +118,13 @@ class SimRenderer:
         cx, cy = self.arena.pit_center
         r = self.arena.pit_radius
 
-        # Draw pit as polygon (circle approximation)
-        num_pts = 32
-        pts = []
-        for i in range(num_pts):
-            angle = 2 * math.pi * i / num_pts
-            px, py = self.cm_to_px(
-                cx + r * math.cos(angle),
-                cy + r * math.sin(angle),
-                screen,
-            )
-            pts.append((px, py))
-        pygame.draw.polygon(screen, PIT_COLOR, pts)
+        # Draw pit as square (matches real pit from 't' calibration)
+        corners = [
+            (cx - r, cy - r), (cx + r, cy - r),
+            (cx + r, cy + r), (cx - r, cy + r),
+        ]
+        pts = [self.cm_to_px(x, y, screen) for x, y in corners]
+        pygame.draw.polygon(screen, PIT_COLOR, pts, 2)
 
         # Label
         font = self._get_font()

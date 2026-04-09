@@ -705,86 +705,100 @@ function renderFrame(idx) {
 
 function drawGrid(cw, ch) {
   if (useCameraView()) {
-    // Grid clipped to arena bounds (122cm = half of 244cm playing field)
-    const half = ARENA_W / 2; // 122cm
     const step = 30;
     const sampleStep = 10;
+    const hasCorners = arenaMeta && arenaMeta.corners_cm && arenaMeta.corners_cm.length >= 3;
 
-    // Vertical lines (constant x from -120 to +120, clipped to arena y bounds)
-    for (let x = -120; x <= 120; x += step) {
+    // Compute arena polygon in canvas space for clipping + border
+    let cornersPx;
+    if (hasCorners) {
+      cornersPx = arenaMeta.corners_cm.map(c => w2c(c[0], c[1]));
+    } else {
+      const half = ARENA_W / 2;
+      cornersPx = [
+        w2c(-half, -half), w2c(half, -half), w2c(half, half), w2c(-half, half)
+      ];
+    }
+
+    // Find bounding box of corners in world cm to size the grid
+    const ccm = hasCorners ? arenaMeta.corners_cm : [[-122,-122],[122,-122],[122,122],[-122,122]];
+    const minX = Math.min(...ccm.map(c => c[0]));
+    const maxX = Math.max(...ccm.map(c => c[0]));
+    const minY = Math.min(...ccm.map(c => c[1]));
+    const maxY = Math.max(...ccm.map(c => c[1]));
+    // Snap grid range to step boundaries beyond the arena
+    const gridMinX = Math.floor(minX / step) * step;
+    const gridMaxX = Math.ceil(maxX / step) * step;
+    const gridMinY = Math.floor(minY / step) * step;
+    const gridMaxY = Math.ceil(maxY / step) * step;
+
+    // Clip grid drawing to arena polygon
+    ctx.save();
+    ctx.beginPath();
+    ctx.moveTo(cornersPx[0][0], cornersPx[0][1]);
+    for (let i = 1; i < cornersPx.length; i++) ctx.lineTo(cornersPx[i][0], cornersPx[i][1]);
+    ctx.closePath();
+    ctx.clip();
+
+    // Vertical lines (constant x, varying y)
+    for (let x = gridMinX; x <= gridMaxX; x += step) {
       const isAxis = x === 0;
       ctx.strokeStyle = isAxis ? '#00c800' : '#006400';
       ctx.lineWidth = isAxis ? 2 : 1;
       const pts = [];
-      for (let y = -half; y <= half; y += sampleStep) {
-        const [px, py] = w2c(x, y);
-        pts.push([px, py]);
+      for (let y = gridMinY; y <= gridMaxY; y += sampleStep) {
+        pts.push(w2c(x, y));
       }
       drawGridPolyline(pts);
-      // Label at last visible point
-      for (let i = pts.length - 1; i >= 0; i--) {
-        if (pts[i] && pts[i][0] >= 0 && pts[i][0] < cw && pts[i][1] >= 0 && pts[i][1] < ch) {
-          ctx.fillStyle = '#00b400';
-          ctx.font = '10px Consolas, monospace';
-          ctx.fillText(`${x}`, pts[i][0] + 4, pts[i][1] - 4);
-          break;
-        }
-      }
     }
-    // Horizontal lines (constant y from -120 to +120, clipped to arena x bounds)
-    for (let y = -120; y <= 120; y += step) {
+    // Horizontal lines (constant y, varying x)
+    for (let y = gridMinY; y <= gridMaxY; y += step) {
       const isAxis = y === 0;
       ctx.strokeStyle = isAxis ? '#00c800' : '#006400';
       ctx.lineWidth = isAxis ? 2 : 1;
       const pts = [];
-      for (let x = -half; x <= half; x += sampleStep) {
-        const [px, py] = w2c(x, y);
-        pts.push([px, py]);
+      for (let x = gridMinX; x <= gridMaxX; x += sampleStep) {
+        pts.push(w2c(x, y));
       }
       drawGridPolyline(pts);
-      // Label at first visible point
-      for (let i = 0; i < pts.length; i++) {
-        if (pts[i] && pts[i][0] >= 0 && pts[i][0] < cw && pts[i][1] >= 0 && pts[i][1] < ch) {
-          ctx.fillStyle = '#00b400';
-          ctx.font = '10px Consolas, monospace';
-          ctx.fillText(`${y}`, pts[i][0] + 4, pts[i][1] - 4);
-          break;
-        }
-      }
     }
 
-    // Arena border — use calibrated corners if available, else computed square
-    if (arenaMeta && arenaMeta.corners_cm && arenaMeta.corners_cm.length >= 3) {
-      const corners = arenaMeta.corners_cm.map(c => w2c(c[0], c[1]));
-      ctx.strokeStyle = '#00c800';
-      ctx.lineWidth = 2;
-      ctx.beginPath();
-      ctx.moveTo(corners[0][0], corners[0][1]);
-      for (let i = 1; i < corners.length; i++) ctx.lineTo(corners[i][0], corners[i][1]);
-      ctx.closePath();
-      ctx.stroke();
-    } else {
-      const border = [
-        w2c(-half, -half), w2c(half, -half), w2c(half, half), w2c(-half, half)
-      ];
-      ctx.strokeStyle = '#00c800';
-      ctx.lineWidth = 2;
-      ctx.beginPath();
-      ctx.moveTo(border[0][0], border[0][1]);
-      for (let i = 1; i < 4; i++) ctx.lineTo(border[i][0], border[i][1]);
-      ctx.closePath();
-      ctx.stroke();
-    }
-
-    // Origin crosshair + ORIGIN label
+    // Origin crosshair (inside clip)
     const [ox, oy] = w2c(0, 0);
     ctx.strokeStyle = '#0f0';
     ctx.lineWidth = 2;
     ctx.beginPath(); ctx.moveTo(ox - 12, oy); ctx.lineTo(ox + 12, oy); ctx.stroke();
     ctx.beginPath(); ctx.moveTo(ox, oy - 12); ctx.lineTo(ox, oy + 12); ctx.stroke();
+
+    ctx.restore(); // remove clip
+
+    // Arena border (drawn outside clip so it's crisp)
+    ctx.strokeStyle = '#00c800';
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.moveTo(cornersPx[0][0], cornersPx[0][1]);
+    for (let i = 1; i < cornersPx.length; i++) ctx.lineTo(cornersPx[i][0], cornersPx[i][1]);
+    ctx.closePath();
+    ctx.stroke();
+
+    // ORIGIN label (outside clip so it's not cut off)
     ctx.fillStyle = '#0f0';
     ctx.font = 'bold 11px Consolas, monospace';
     ctx.fillText('ORIGIN', ox + 12, oy - 10);
+
+    // Grid labels along arena edge (outside clip)
+    ctx.fillStyle = '#00b400';
+    ctx.font = '10px Consolas, monospace';
+    for (let x = gridMinX; x <= gridMaxX; x += step) {
+      if (x === 0) continue;
+      const [lx, ly] = w2c(x, gridMinY);
+      ctx.fillText(`${x}`, lx + 2, ly - 3);
+    }
+    for (let y = gridMinY; y <= gridMaxY; y += step) {
+      if (y === 0) continue;
+      const [lx, ly] = w2c(gridMinX, y);
+      ctx.fillText(`${y}`, lx + 2, ly - 3);
+    }
     return;
   }
   // Fallback: abstract dark grid

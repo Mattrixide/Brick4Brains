@@ -686,21 +686,20 @@ function renderFrame(idx) {
 
 function drawGrid(cw, ch) {
   if (useCameraView()) {
-    // Perspective grid matching CV window exactly: 300cm range, 30cm step, 10cm samples
-    const range = 300;
+    // Grid clipped to arena bounds (122cm = half of 244cm playing field)
+    const half = ARENA_W / 2; // 122cm
     const step = 30;
     const sampleStep = 10;
-    // Vertical lines (constant x, varying y)
-    for (let x = -range; x <= range; x += step) {
+
+    // Vertical lines (constant x from -120 to +120, clipped to arena y bounds)
+    for (let x = -120; x <= 120; x += step) {
       const isAxis = x === 0;
       ctx.strokeStyle = isAxis ? '#00c800' : '#006400';
       ctx.lineWidth = isAxis ? 2 : 1;
       const pts = [];
-      for (let y = -range; y <= range; y += sampleStep) {
+      for (let y = -half; y <= half; y += sampleStep) {
         const [px, py] = w2c(x, y);
-        // clip to extended bounds like CV window
-        if (px > -500 && px < cw + 500 && py > -500 && py < ch + 500) pts.push([px, py]);
-        else if (pts.length) pts.push(null); // break
+        pts.push([px, py]);
       }
       drawGridPolyline(pts);
       // Label at last visible point
@@ -713,16 +712,15 @@ function drawGrid(cw, ch) {
         }
       }
     }
-    // Horizontal lines (constant y, varying x)
-    for (let y = -range; y <= range; y += step) {
+    // Horizontal lines (constant y from -120 to +120, clipped to arena x bounds)
+    for (let y = -120; y <= 120; y += step) {
       const isAxis = y === 0;
       ctx.strokeStyle = isAxis ? '#00c800' : '#006400';
       ctx.lineWidth = isAxis ? 2 : 1;
       const pts = [];
-      for (let x = -range; x <= range; x += sampleStep) {
+      for (let x = -half; x <= half; x += sampleStep) {
         const [px, py] = w2c(x, y);
-        if (px > -500 && px < cw + 500 && py > -500 && py < ch + 500) pts.push([px, py]);
-        else if (pts.length) pts.push(null);
+        pts.push([px, py]);
       }
       drawGridPolyline(pts);
       // Label at first visible point
@@ -735,7 +733,20 @@ function drawGrid(cw, ch) {
         }
       }
     }
-    // Origin crosshair + ORIGIN label (bright green, matching cv2.drawMarker)
+
+    // Arena border (green outline at the playing field edge)
+    const border = [
+      w2c(-half, -half), w2c(half, -half), w2c(half, half), w2c(-half, half)
+    ];
+    ctx.strokeStyle = '#00c800';
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.moveTo(border[0][0], border[0][1]);
+    for (let i = 1; i < 4; i++) ctx.lineTo(border[i][0], border[i][1]);
+    ctx.closePath();
+    ctx.stroke();
+
+    // Origin crosshair + ORIGIN label
     const [ox, oy] = w2c(0, 0);
     ctx.strokeStyle = '#0f0';
     ctx.lineWidth = 2;

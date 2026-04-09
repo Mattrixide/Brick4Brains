@@ -394,11 +394,12 @@ dropZone.addEventListener('drop', e => {
 
 function loadFiles(fileList) {
   const files = Array.from(fileList);
-  let jsonlFile = null, metaFile = null, imageFile = null;
+  let jsonlFile = null, metaFile = null, imageFile = null, battleConfigFile = null;
 
   for (const f of files) {
     if (f.name.endsWith('.jsonl')) jsonlFile = f;
     else if (f.name.endsWith('_arena.json') || (f.name.endsWith('.json') && f.name.includes('arena'))) metaFile = f;
+    else if (f.name === 'battle_config.json') battleConfigFile = f;
     else if (f.name.endsWith('.png') || f.name.endsWith('.jpg')) imageFile = f;
   }
 
@@ -452,6 +453,19 @@ function loadFiles(fileList) {
     }));
   }
 
+  // Load battle config (for pit data fallback)
+  let battleConfig = null;
+  if (battleConfigFile) {
+    promises.push(new Promise(resolve => {
+      const r = new FileReader();
+      r.onload = () => {
+        try { battleConfig = JSON.parse(r.result); } catch(e) {}
+        resolve();
+      };
+      r.readAsText(battleConfigFile);
+    }));
+  }
+
   // Load arena image
   if (imageFile) {
     promises.push(new Promise(resolve => {
@@ -468,6 +482,15 @@ function loadFiles(fileList) {
 
   Promise.all(promises).then(() => {
     if (frames.length === 0) return;
+    // Merge pit data from battle_config into arenaMeta if missing
+    if (arenaMeta && battleConfig && !arenaMeta.pit_x_cm) {
+      if (battleConfig.pit_x_cm || battleConfig.pit_y_cm) {
+        arenaMeta.pit_x_cm = battleConfig.pit_x_cm;
+        arenaMeta.pit_y_cm = battleConfig.pit_y_cm;
+        arenaMeta.pit_radius_cm = battleConfig.pit_radius_cm;
+        arenaMeta.pit_danger_radius_cm = battleConfig.pit_danger_radius_cm || battleConfig.pit_radius_cm + 15;
+      }
+    }
     dropZone.classList.add('hidden');
 
     let info = `${jsonlFile.name}  |  ${frames.length} frames  |  ${(frames[frames.length-1].t).toFixed(1)}s`;
@@ -663,42 +686,64 @@ function renderFrame(idx) {
 
 function drawGrid(cw, ch) {
   if (useCameraView()) {
-    // Perspective grid matching CV window — green lines, sampled for smooth curves
-    const range = 150;
+    // Perspective grid matching CV window exactly: 300cm range, 30cm step, 10cm samples
+    const range = 300;
     const step = 30;
     const sampleStep = 10;
-    ctx.globalAlpha = 0.7;
+    // Vertical lines (constant x, varying y)
     for (let x = -range; x <= range; x += step) {
       const isAxis = x === 0;
       ctx.strokeStyle = isAxis ? '#00c800' : '#006400';
       ctx.lineWidth = isAxis ? 2 : 1;
-      ctx.beginPath();
-      let first = true;
+      const pts = [];
       for (let y = -range; y <= range; y += sampleStep) {
         const [px, py] = w2c(x, y);
-        if (first) { ctx.moveTo(px, py); first = false; } else ctx.lineTo(px, py);
+        // clip to extended bounds like CV window
+        if (px > -500 && px < cw + 500 && py > -500 && py < ch + 500) pts.push([px, py]);
+        else if (pts.length) pts.push(null); // break
       }
-      ctx.stroke();
+      drawGridPolyline(pts);
+      // Label at last visible point
+      for (let i = pts.length - 1; i >= 0; i--) {
+        if (pts[i] && pts[i][0] >= 0 && pts[i][0] < cw && pts[i][1] >= 0 && pts[i][1] < ch) {
+          ctx.fillStyle = '#00b400';
+          ctx.font = '10px Consolas, monospace';
+          ctx.fillText(`${x}`, pts[i][0] + 4, pts[i][1] - 4);
+          break;
+        }
+      }
     }
+    // Horizontal lines (constant y, varying x)
     for (let y = -range; y <= range; y += step) {
       const isAxis = y === 0;
       ctx.strokeStyle = isAxis ? '#00c800' : '#006400';
       ctx.lineWidth = isAxis ? 2 : 1;
-      ctx.beginPath();
-      let first = true;
+      const pts = [];
       for (let x = -range; x <= range; x += sampleStep) {
         const [px, py] = w2c(x, y);
-        if (first) { ctx.moveTo(px, py); first = false; } else ctx.lineTo(px, py);
+        if (px > -500 && px < cw + 500 && py > -500 && py < ch + 500) pts.push([px, py]);
+        else if (pts.length) pts.push(null);
       }
-      ctx.stroke();
+      drawGridPolyline(pts);
+      // Label at first visible point
+      for (let i = 0; i < pts.length; i++) {
+        if (pts[i] && pts[i][0] >= 0 && pts[i][0] < cw && pts[i][1] >= 0 && pts[i][1] < ch) {
+          ctx.fillStyle = '#00b400';
+          ctx.font = '10px Consolas, monospace';
+          ctx.fillText(`${y}`, pts[i][0] + 4, pts[i][1] - 4);
+          break;
+        }
+      }
     }
-    // Origin crosshair
+    // Origin crosshair + ORIGIN label (bright green, matching cv2.drawMarker)
     const [ox, oy] = w2c(0, 0);
-    ctx.strokeStyle = '#00c800';
+    ctx.strokeStyle = '#0f0';
     ctx.lineWidth = 2;
     ctx.beginPath(); ctx.moveTo(ox - 12, oy); ctx.lineTo(ox + 12, oy); ctx.stroke();
     ctx.beginPath(); ctx.moveTo(ox, oy - 12); ctx.lineTo(ox, oy + 12); ctx.stroke();
-    ctx.globalAlpha = 1;
+    ctx.fillStyle = '#0f0';
+    ctx.font = 'bold 11px Consolas, monospace';
+    ctx.fillText('ORIGIN', ox + 12, oy - 10);
     return;
   }
   // Fallback: abstract dark grid
@@ -716,25 +761,17 @@ function drawGrid(cw, ch) {
   }
 }
 
+function drawGridPolyline(pts) {
+  for (let i = 0; i < pts.length - 1; i++) {
+    if (pts[i] && pts[i + 1]) {
+      ctx.beginPath(); ctx.moveTo(pts[i][0], pts[i][1]); ctx.lineTo(pts[i+1][0], pts[i+1][1]); ctx.stroke();
+    }
+  }
+}
+
 function drawArenaImage(cw, ch) {
   // Legacy abstract-view warp (only used when no homography)
   if (!arenaMeta || !arenaMeta.inv_homography) return;
-}
-
-function drawPitPoly(cx_cm, cy_cm, half, style, width, dash) {
-  const corners = [
-    w2c(cx_cm - half, cy_cm + half), w2c(cx_cm + half, cy_cm + half),
-    w2c(cx_cm + half, cy_cm - half), w2c(cx_cm - half, cy_cm - half)
-  ];
-  ctx.strokeStyle = style;
-  ctx.lineWidth = width;
-  ctx.setLineDash(dash);
-  ctx.beginPath();
-  ctx.moveTo(corners[0][0], corners[0][1]);
-  for (let i = 1; i < 4; i++) ctx.lineTo(corners[i][0], corners[i][1]);
-  ctx.closePath();
-  ctx.stroke();
-  ctx.setLineDash([]);
 }
 
 function drawPit() {
@@ -744,20 +781,24 @@ function drawPit() {
   const r = arenaMeta.pit_radius_cm;
   if (!r) return;
 
-  // Pit square (perspective-correct polygon)
-  drawPitPoly(px, py, r, '#f00', 2, [6, 4]);
+  // Pit square — solid red polyline matching CV window (BGR 0,0,255 = red)
+  // CV uses corners: (-half,-half), (+half,-half), (+half,+half), (-half,+half)
+  const corners = [
+    w2c(px - r, py - r), w2c(px + r, py - r),
+    w2c(px + r, py + r), w2c(px - r, py + r)
+  ];
+  ctx.strokeStyle = '#f00';
+  ctx.lineWidth = 2;
+  ctx.beginPath();
+  ctx.moveTo(corners[0][0], corners[0][1]);
+  for (let i = 1; i < 4; i++) ctx.lineTo(corners[i][0], corners[i][1]);
+  ctx.closePath();
+  ctx.stroke();
 
-  // Danger radius
-  const dr = arenaMeta.pit_danger_radius_cm || r + 15;
-  drawPitPoly(px, py, dr, '#f004', 1, [3, 3]);
-
-  // Label
-  const [cx, cy] = w2c(px, py);
-  ctx.fillStyle = '#f44';
+  // PIT label at first corner (matching CV: putText at corner[0])
+  ctx.fillStyle = '#f00';
   ctx.font = 'bold 12px Consolas, monospace';
-  ctx.textAlign = 'center';
-  ctx.fillText('PIT', cx, cy + 4);
-  ctx.textAlign = 'start';
+  ctx.fillText('PIT', corners[0][0], corners[0][1] - 8);
 }
 
 function drawPolygon(pts, color, lineWidth) {
@@ -1266,6 +1307,14 @@ resizeCanvas();
           }
         } catch(e) {}
       }
+      // Load battle_config.json for pit data
+      try {
+        const r = await fetch('/battle_config.json');
+        if (r.ok) {
+          const blob = await r.blob();
+          fileObjects.push(new File([blob], 'battle_config.json', {type: 'application/json'}));
+        }
+      } catch(e) {}
       if (fileObjects.length > 0) {
         loadFiles(fileObjects);
         console.log('Auto-loaded:', fileObjects.map(f => f.name));

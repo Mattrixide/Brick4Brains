@@ -1424,6 +1424,14 @@ class AutoDriveApp:
                     frame_shape = frame.shape if frame is not None else (720, 1280)
                     arena_meta["frame_w"] = int(frame_shape[1]) if len(frame_shape) > 1 else 1280
                     arena_meta["frame_h"] = int(frame_shape[0])
+                    # Include pit data from battle config
+                    if hasattr(self, '_battle_config'):
+                        bc = self._battle_config
+                        if bc.pit_x_cm != 0 or bc.pit_y_cm != 0:
+                            arena_meta["pit_x_cm"] = bc.pit_x_cm
+                            arena_meta["pit_y_cm"] = bc.pit_y_cm
+                            arena_meta["pit_radius_cm"] = bc.pit_radius_cm
+                            arena_meta["pit_danger_radius_cm"] = getattr(bc, 'pit_danger_radius_cm', bc.pit_radius_cm + 15)
                     with open(arena_meta_path, "w") as amf:
                         json.dump(arena_meta, amf, indent=2)
                     # Copy arena snapshot (from 'r' key) for replay overlay

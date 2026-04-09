@@ -39,6 +39,9 @@ def find_latest_replay():
         result["arena_png"] = f"logs/{arena_png}"
     elif os.path.exists(os.path.join(BASE, "arena_snapshot.png")):
         result["arena_png"] = "arena_snapshot.png"
+    # Include battle config for pit data (fallback when arena_json lacks it)
+    if os.path.exists(os.path.join(BASE, "battle_config.json")):
+        result["battle_config"] = "battle_config.json"
 
     return result
 
@@ -91,6 +94,13 @@ class ReplayHandler(http.server.SimpleHTTPRequestHandler):
       const apResp = await fetch('/' + info.arena_png);
       const apBlob = await apResp.blob();
       files.push(new File([apBlob], info.arena_png.split('/').pop(), {type: 'image/png'}));
+    }
+
+    // Load battle config for pit data
+    if (info.battle_config) {
+      const bcResp = await fetch('/' + info.battle_config);
+      const bcBlob = await bcResp.blob();
+      files.push(new File([bcBlob], 'battle_config.json', {type: 'application/json'}));
     }
 
     console.log('Auto-loading', files.length, 'files:', files.map(f => f.name));

@@ -267,3 +267,189 @@ class HeadingFusion:
         if self._frames_without_cv == 0:
             return 1.0
         return max(0.0, 1.0 - self._frames_without_cv * 0.01)
+
+
+# ---------------------------------------------------------------------------
+# Robot position Kalman filter (bridges ArUco dropouts)
+# ---------------------------------------------------------------------------
+
+import numpy as np
+
+
+class RobotPositionKF:
+    """4-state Kalman filter [x, y, vx, vy] for our robot position (cm units).
+
+    Constant-velocity process model (no IMU accel — vibration causes divergence).
+    ArUco position as measurement. Bridges 50%+ dropout gracefully.
+    """
+
+    def __init__(self, dt=1/60, sigma_a_cm=500.0, sigma_meas_cm=5.0,
+                 arena_half_cm=122.0, max_coast=90):
+        self.dt = dt
+        self.x = np.zeros(4, dtype=np.float64)       # [x, y, vx, vy] in cm
+        self.P = np.eye(4, dtype=np.float64) * 1000.0  # high initial uncertainty
+
+        # State transition (constant velocity)
+        self.F = np.array([
+            [1, 0, dt, 0],
+            [0, 1, 0, dt],
+            [0, 0, 1, 0],
+            [0, 0, 0, 1],
+        ], dtype=np.float64)
+
+        # Measurement: observe position only
+        self.H = np.array([
+            [1, 0, 0, 0],
+            [0, 1, 0, 0],
+        ], dtype=np.float64)
+
+        # Process noise (discrete white noise acceleration, cm units)
+        q = sigma_a_cm ** 2
+        dt2, dt3, dt4 = dt**2, dt**3, dt**4
+        self.Q_baseline = np.array([
+            [dt4/4, 0,     dt3/2, 0    ],
+            [0,     dt4/4, 0,     dt3/2],
+            [dt3/2, 0,     dt2,   0    ],
+            [0,     dt3/2, 0,     dt2  ],
+        ], dtype=np.float64) * q
+        self.Q = self.Q_baseline.copy()
+
+        # Reduced Q for stationary hint (pin state)
+        self.Q_stationary = self.Q_baseline * 0.1
+
+        # Measurement noise (cm)
+        self.R = np.eye(2, dtype=np.float64) * sigma_meas_cm**2
+
+        self.arena_half = arena_half_cm
+        self.max_coast = max_coast
+        self.frames_without_measurement = 0
+        self._initialized = False
+        self._stationary = False
+
+        # Innovation gate threshold (chi-squared, 2 DOF, 99%)
+        self._gate_threshold = 9.21
+        self._reinit_coast_threshold = 5  # reinit if coasting this many frames
+
+    def predict(self):
+        """Predict step — call every frame."""
+        if not self._initialized:
+            return
+
+        # Velocity decay during coast
+        if self.frames_without_measurement > 0:
+            decay = 0.90
+            self.x[2] *= decay
+            self.x[3] *= decay
+
+        # Stationary hint: zero velocity
+        if self._stationary:
+            self.x[2] = 0.0
+            self.x[3] = 0.0
+
+        self.x = self.F @ self.x
+
+        # Arena bounds clamping
+        for i, vi in [(0, 2), (1, 3)]:
+            if abs(self.x[i]) > self.arena_half:
+                self.x[i] = np.clip(self.x[i], -self.arena_half, self.arena_half)
+                self.x[vi] = 0.0
+
+        Q = self.Q_stationary if self._stationary else self.Q
+        self.P = self.F @ self.P @ self.F.T + Q
+
+    def update(self, x_cm, y_cm):
+        """Update with ArUco measurement. Call when detected."""
+        z = np.array([x_cm, y_cm], dtype=np.float64)
+
+        if not self._initialized:
+            self.x[:2] = z
+            self.x[2:] = 0.0
+            self._initialized = True
+            self.frames_without_measurement = 0
+            return
+
+        # Innovation (residual)
+        y = z - self.H @ self.x
+        S = self.H @ self.P @ self.H.T + self.R
+
+        # Innovation gate — reject outliers
+        try:
+            S_inv = np.linalg.inv(S)
+            mahal_dist = float(y.T @ S_inv @ y)
+        except np.linalg.LinAlgError:
+            mahal_dist = 0.0
+
+        if mahal_dist > self._gate_threshold:
+            # Measurement rejected as outlier
+            if self.frames_without_measurement >= self._reinit_coast_threshold:
+                # Been coasting too long — snap to measurement (reinitialize)
+                self.x[:2] = z
+                self.x[2:] = 0.0
+                self.P = np.eye(4, dtype=np.float64) * 100.0
+                self.frames_without_measurement = 0
+                return
+            else:
+                # Short coast — discard this measurement
+                self.frames_without_measurement += 1
+                return
+
+        # Standard Kalman update
+        K = self.P @ self.H.T @ S_inv
+        self.x = self.x + K @ y
+        self.P = (np.eye(4) - K @ self.H) @ self.P
+
+        # Velocity clamp (physical max for beetleweight)
+        MAX_VEL = 120.0  # cm/s
+        speed = math.sqrt(self.x[2]**2 + self.x[3]**2)
+        if speed > MAX_VEL:
+            scale = MAX_VEL / speed
+            self.x[2] *= scale
+            self.x[3] *= scale
+
+        self.frames_without_measurement = 0
+
+    def update_no_measurement(self):
+        """Call when ArUco is not detected this frame."""
+        self.frames_without_measurement += 1
+
+    def set_stationary_hint(self, stationary: bool):
+        """Call with True during pin state, False otherwise. Idempotent."""
+        self._stationary = stationary
+
+    @property
+    def position_cm(self):
+        """Estimated (x, y) in cm. Always valid after first detection."""
+        if not self._initialized:
+            return (0.0, 0.0)
+        return (float(self.x[0]), float(self.x[1]))
+
+    @property
+    def velocity_cm_s(self):
+        """Estimated (vx, vy) in cm/s."""
+        if not self._initialized:
+            return (0.0, 0.0)
+        return (float(self.x[2]), float(self.x[3]))
+
+    @property
+    def speed_cm_s(self):
+        return math.sqrt(self.x[2]**2 + self.x[3]**2) if self._initialized else 0.0
+
+    @property
+    def is_tracking(self):
+        return self._initialized and self.frames_without_measurement < self.max_coast
+
+    @property
+    def confidence(self):
+        """1.0 when fresh, decays with coast frames."""
+        if not self._initialized:
+            return 0.0
+        if self.frames_without_measurement == 0:
+            return 1.0
+        return max(0.0, 1.0 - self.frames_without_measurement / self.max_coast)
+
+    def reset(self):
+        self._initialized = False
+        self.x = np.zeros(4, dtype=np.float64)
+        self.P = np.eye(4, dtype=np.float64) * 1000.0
+        self.frames_without_measurement = 0
+        self._stationary = False

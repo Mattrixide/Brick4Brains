@@ -341,7 +341,7 @@ class ArUcoTracker:
 
         # ROI tracking state
         self._last_marker_center: Optional[tuple[float, float]] = None
-        self._roi_margin: int = 200  # pixels around last detection
+        self._roi_margin: int = 300  # pixels around last detection
         self._roi_frame_count: int = 0
         self._roi_full_search_interval: int = 10  # full-frame every N frames
         self._roi_miss_count: int = 0  # consecutive ROI misses
@@ -359,28 +359,73 @@ class ArUcoTracker:
     def detect(self, frame: np.ndarray) -> list[dict]:
         """
         Detect all ArUco markers in the frame.
-        Uses ROI tracking: searches a crop around the last detection for speed,
-        falls back to full-frame every N frames or when marker is lost.
+        Uses ROI tracking: searches a full-res crop around the last detection,
+        falls back to half-res full-frame every N frames or when marker is lost.
 
         Returns a list of dicts with keys: id, corners, center, heading_rad.
         """
         gray = self._preprocess(frame)
         h, w = gray.shape[:2]
 
-        # Downscale for ArUco detection (4x fewer pixels = ~4x faster)
-        # A 50px marker at 1280x800 becomes ~25px at 640x400 — still detectable
+        self._roi_frame_count += 1
+        use_roi = (
+            self._last_marker_center is not None
+            and self._roi_miss_count < 3
+            and self._roi_frame_count % self._roi_full_search_interval != 0
+        )
+
+        if use_roi:
+            # ROI: full-resolution crop around last known position (~50px marker)
+            cx, cy = int(self._last_marker_center[0]), int(self._last_marker_center[1])
+            margin = self._roi_margin  # 200px
+            x1 = max(0, cx - margin)
+            y1 = max(0, cy - margin)
+            x2 = min(w, cx + margin)
+            y2 = min(h, cy + margin)
+            roi = gray[y1:y2, x1:x2]
+
+            corners_list, ids, _ = self.detector.detectMarkers(roi)
+
+            if ids is not None:
+                # Map ROI coords back to full-frame
+                detections = self._process_detections(corners_list, ids, offset_x=x1, offset_y=y1)
+                if detections:
+                    self._roi_miss_count = 0
+                    self._last_marker_center = (detections[0]["center"][0], detections[0]["center"][1])
+                    return detections
+
+            # ROI miss
+            self._roi_miss_count += 1
+
+        # Full-frame fallback at half resolution (fast, catches marker anywhere)
         scale = 0.5
         small = cv2.resize(gray, (w // 2, h // 2), interpolation=cv2.INTER_AREA)
         corners_list, ids, _ = self.detector.detectMarkers(small)
 
-        detections = []
-        if ids is None:
-            return detections
+        if ids is not None:
+            detections = self._process_detections(corners_list, ids, scale=1.0 / scale)
+            if detections:
+                self._roi_miss_count = 0
+                self._last_marker_center = (detections[0]["center"][0], detections[0]["center"][1])
+                return detections
 
+        # Nothing found
+        self._last_marker_center = None
+        self._roi_miss_count = 0  # reset so next detection starts fresh ROI
+        return []
+
+    def _process_detections(self, corners_list, ids, scale: float = 1.0,
+                            offset_x: int = 0, offset_y: int = 0) -> list[dict]:
+        """Convert raw ArUco detections to standard format with coordinate mapping."""
+        detections = []
         for i, marker_id in enumerate(ids.flatten()):
             corners = corners_list[i][0].copy()  # shape (4, 2)
-            # Scale coordinates back to full resolution
-            corners *= (1.0 / scale)
+            # Apply scale (for half-res) or offset (for ROI)
+            if scale != 1.0:
+                corners *= scale
+            if offset_x or offset_y:
+                corners[:, 0] += offset_x
+                corners[:, 1] += offset_y
             center = corners.mean(axis=0)
 
             # Heading: vector from midpoint of bottom edge to midpoint of top edge

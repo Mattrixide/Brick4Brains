@@ -36,7 +36,7 @@ from autonomy import (
     generate_goto,
 )
 from dashboard_server import DashboardServer, create_shared_state
-from sensor_fusion import HeadingFusion, TelemetryReceiver, IMUPoller
+from sensor_fusion import HeadingFusion, TelemetryReceiver, IMUPoller, RobotPositionKF
 from enemy_tracker import EnemyTracker
 from intercept import (
     compute_intercept_point,
@@ -178,8 +178,9 @@ class AutoDriveApp:
         self._enemy_tracker = EnemyTracker(dt=1/60, sigma_a=5.0, sigma_meas_cm=8.0)
         self._pursuit_fsm = PursuitFSM()
         self._smoothed_intercept = SmoothedIntercept(alpha=0.3)
-        self._our_velocity = (0.0, 0.0)  # estimated from position changes
+        self._our_velocity = (0.0, 0.0)  # raw finite-diff (kept for legacy modes)
         self._prev_pos = None
+        self._pos_kf = RobotPositionKF(dt=1/60, sigma_meas_cm=5.0)
         self._our_max_speed_cm_s = 50.0  # tune based on robot capability
         self._intercept_prev_steering = 0.0  # slew rate limiter for intercept
 
@@ -725,12 +726,20 @@ class AutoDriveApp:
                 # Update sensor fusion with CV heading
                 self._heading_fusion.update_cv(heading_rad)
 
-                # Estimate our velocity from position changes
+                # Estimate our velocity from position changes (legacy, kept for non-battle modes)
                 if self._prev_pos is not None:
                     vx = (x_cm - self._prev_pos[0]) / max(dt, 0.001)
                     vy = (y_cm - self._prev_pos[1]) / max(dt, 0.001)
+                    speed = math.hypot(vx, vy)
+                    if speed > 120.0:
+                        scale = 120.0 / speed
+                        vx, vy = vx * scale, vy * scale
                     self._our_velocity = (vx, vy)
                 self._prev_pos = (x_cm, y_cm)
+
+                # Kalman filter: update with ArUco measurement
+                self._pos_kf.predict()
+                self._pos_kf.update(x_cm, y_cm)
 
                 # ArUco corners in cm (for replay logging)
                 try:
@@ -744,6 +753,9 @@ class AutoDriveApp:
 
             if pose is None and detected is False:
                 self._heading_fusion.update_no_cv()
+                # Kalman filter: predict-only (no measurement)
+                self._pos_kf.predict()
+                self._pos_kf.update_no_measurement()
 
             # 2b. Enemy tracking (run in ALL intercept-related modes)
             _te = time.perf_counter()
@@ -1179,16 +1191,24 @@ class AutoDriveApp:
                         self._system_mode = SYSTEM_POSTMATCH
                         self._battle_controller.enter_victory_dance()
                     else:
-                        # Build context from current sensor data
-                        # Freeze our position when ArUco is lost (avoid (0,0) phantom)
+                        # Build context from sensor data
+                        # KF provides smooth position + velocity even during ArUco dropout
                         if detected:
                             self._last_known_pos = (x_cm, y_cm)
                             self._last_known_heading = heading_rad
-                        battle_pos = (x_cm, y_cm) if detected else getattr(self, '_last_known_pos', (x_cm, y_cm))
+
+                        # Use KF output for position and velocity (always valid after first detection)
+                        battle_pos = self._pos_kf.position_cm if self._pos_kf.is_tracking else (
+                            (x_cm, y_cm) if detected else getattr(self, '_last_known_pos', (x_cm, y_cm))
+                        )
+                        battle_velocity = self._pos_kf.velocity_cm_s if self._pos_kf.is_tracking else (0.0, 0.0)
                         battle_heading = heading_rad if detected else getattr(self, '_last_known_heading', heading_rad)
 
+                        # Set stationary hint for pin state (reduces KF drift)
+                        self._pos_kf.set_stationary_hint(self._battle_controller.state == "pin")
+
                         enemy_pos = None
-                        enemy_heading = self._enemy_tracker.heading_rad  # from orientation estimator
+                        enemy_heading = self._enemy_tracker.heading_rad
                         enemy_vel = None
                         e_detected = self._enemy_tracker.enemy_detected
                         e_tracking = self._enemy_tracker.is_tracking
@@ -1197,10 +1217,9 @@ class AutoDriveApp:
 
                         if e_tracking and self._enemy_tracker.position_cm is not None:
                             enemy_pos = self._enemy_tracker.position_cm
-                            if detected:
-                                dist = math.hypot(
-                                    enemy_pos[0] - x_cm, enemy_pos[1] - y_cm
-                                )
+                            # Use KF position for distance calc (smooth even during dropout)
+                            our_x, our_y = battle_pos
+                            dist = math.hypot(enemy_pos[0] - our_x, enemy_pos[1] - our_y)
                             vel_arr = self._enemy_tracker.velocity_cm_s
                             if vel_arr is not None:
                                 enemy_vel = (float(vel_arr[0]), float(vel_arr[1]))
@@ -1219,9 +1238,6 @@ class AutoDriveApp:
                             imu_heading = tel.get("heading", 0.0)
                             imu_pitch = tel.get("pitch", 0.0)
                             imu_roll = tel.get("roll", 0.0)
-
-                        # Zero velocity when ArUco lost to prevent stale readings
-                        battle_velocity = self._our_velocity if detected else (0.0, 0.0)
 
                         ctx = BattleContext(
                             our_pos=battle_pos,

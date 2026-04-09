@@ -149,6 +149,12 @@ class BattleController:
         self._unstick_start_pos: tuple[float, float] | None = None
         self._last_retreat_reason: str | None = None
 
+        # Pin state
+        self._pin_entry_time: float = 0.0
+
+        # Passive impact cooldown
+        self._last_impact_time: float = 0.0
+
         # Phase tracking
         self._prev_phase = "start"
 
@@ -232,10 +238,10 @@ class BattleController:
             while self._last_positions and self._last_positions[0][2] < cutoff:
                 self._last_positions.popleft()
 
-        # Track velocity for stall detection (3 named floats)
+        # Track velocity for stall detection (3 named floats, clamped to physical max)
         self._speed_t2 = self._speed_t1
         self._speed_t1 = self._speed_t0
-        self._speed_t0 = math.hypot(ctx.our_velocity[0], ctx.our_velocity[1])
+        self._speed_t0 = min(math.hypot(ctx.our_velocity[0], ctx.our_velocity[1]), 120.0)
 
         # Remember last enemy position
         if ctx.enemy_detected and ctx.enemy_pos is not None:
@@ -255,8 +261,12 @@ class BattleController:
             pass
         else:
             # Passive impact detection — "we got hit" while not commanding throttle
+            # 5000mg threshold (vibration is 1000-3000mg), cooldown 200ms, exclude high-energy states
             accel_mag = math.hypot(ctx.accel_x_mg, ctx.accel_y_mg)
-            if accel_mag > 2000 and abs(ctx.throttle_cmd) < 0.2:
+            if (accel_mag > 5000 and abs(ctx.throttle_cmd) < 0.2
+                    and current not in ("charge_pursue", "charge_reorient", "pin", "pit_push", "pit_commit")
+                    and (now - self._last_impact_time) > 0.2):
+                self._last_impact_time = now
                 self._hit_count += 1
                 log.info("[battle] PASSIVE IMPACT: %.0fmg (hit #%d)", accel_mag, self._hit_count)
                 if current == "acquire":
@@ -301,16 +311,15 @@ class BattleController:
                         ex, ey = ctx.enemy_pos
                         if _near_wall(ex, ey, self.cfg.wall_threshold_cm):
                             # Pin!
-                            self.machine.set_state("pin")
-                            self.pin_timer.start()
-                            log.info("[battle] PIN — push committed to wall")
+                            self._enter_pin(now)
                             return self._action_pin(ctx, now)
                     # No pin — wall reverse
                     self._enter_wall_reverse(ctx, now)
                     return self._action_wall_reverse(ctx, now)
 
             # ArUco lost recovery — dead-reckon reverse (cheap frame counter check)
-            if current not in ("evade_retreat", "evade_reposition", "wall_reverse", "unstick"):
+            # Pin + charge_pursue excluded: ArUco loss during engagement is expected
+            if current not in ("evade_retreat", "evade_reposition", "wall_reverse", "unstick", "pin", "charge_pursue"):
                 if self._aruco_lost_frames > 60:
                     if self._aruco_lost_frames > 180:
                         # Give up — enter lost_aruco
@@ -323,10 +332,12 @@ class BattleController:
                         return self._dead_reckon_reverse(ctx, now)
 
             # Enemy lost → lost_target (from combat states — cheap check)
+            # Pin uses longer threshold (enemy hidden under us during pin)
             if current in ("charge_pursue", "charge_flank",
                            "charge_reorient", "pin",
                            "pit_position", "pit_push"):
-                if not ctx.enemy_detected and ctx.frames_without_detection > 30:
+                lost_threshold = 150 if current == "pin" else 30
+                if not ctx.enemy_detected and ctx.frames_without_detection > lost_threshold:
                     self._enter_lost_target(now)
                     return self._action_lost_target(ctx, now)
 
@@ -424,6 +435,8 @@ class BattleController:
         self._prev_phase = "start"
         self._stuck_accel_frames = 0
         self._last_retreat_reason = None
+        self._pin_entry_time = 0.0
+        self._last_impact_time = 0.0
         self._log_t = 0.0
         self.pin_timer.reset()
 
@@ -535,6 +548,12 @@ class BattleController:
         self._push_commit_timer = None
         log.info("[battle] WALL REVERSE — backing up")
 
+    def _enter_pin(self, now: float) -> None:
+        self.machine.set_state("pin")
+        self.pin_timer.start()
+        self._pin_entry_time = now
+        log.info("[battle] PIN — holding")
+
     # -- Action functions ---------------------------------------------------
 
     def _action_wait(self, ctx: BattleContext, now: float) -> BattleOutput:
@@ -632,9 +651,7 @@ class BattleController:
         if ctx.distance_cm < self.cfg.charge_close_range_cm:
             ex, ey = ctx.enemy_pos
             if _near_wall(ex, ey, self.cfg.wall_threshold_cm):
-                self.machine.set_state("pin")
-                self.pin_timer.start()
-                log.info("[battle] PIN — enemy at wall (%.0f, %.0f)", ex, ey)
+                self._enter_pin(now)
                 return self._action_pin(ctx, now)
 
         # Pure pursuit arc
@@ -782,14 +799,17 @@ class BattleController:
             self._enter_retreat(reason="pin_release")
             return self._action_evade_retreat(ctx, now)
 
-        # ArUco lost too long during pin → retreat
-        if self._aruco_lost_frames > 30:
+        # ArUco lost safety valve — 4s (pin timer at 5s fires first in normal case)
+        if self._aruco_lost_frames > 240:
             self.pin_timer.reset()
             self._enter_retreat(reason="aruco_lost")
             return self._action_evade_retreat(ctx, now)
 
-        # Enemy escaped?
-        if ctx.enemy_tracking and ctx.our_detected and ctx.distance_cm > self.cfg.pin_escape_range_cm:
+        # Enemy escaped? (0.5s grace period after pin entry to avoid bounce oscillation)
+        pin_elapsed = now - self._pin_entry_time
+        if (pin_elapsed > 0.5
+                and ctx.enemy_tracking and ctx.our_detected
+                and ctx.distance_cm > self.cfg.pin_escape_range_cm):
             self.pin_timer.reset()
             self.machine.set_state("charge_pursue")
             self._prev_steer = 0.0
@@ -961,7 +981,12 @@ class BattleController:
 
         if elapsed > retreat_time:
             self._retreat_timer = None
-            if self.cfg.strategy == "evade":
+            # If retreat was due to ArUco loss and still blind, don't drive blind
+            if self._last_retreat_reason == "aruco_lost" and not ctx.our_detected:
+                self.machine.set_state("lost_aruco")
+                log.info("[battle] RETREAT ended blind — waiting for ArUco")
+                return BattleOutput()
+            elif self.cfg.strategy == "evade":
                 self.machine.set_state("evade_reposition")
                 self._reposition_timer = now
             else:

@@ -189,6 +189,9 @@ class BattleController:
         self._lost_aruco_t: float = 0.0
         self._lost_aruco_phase: int = -1
 
+        # Wall stuck counter
+        self._wall_stuck_frames: int = 0
+
         # Build the HSM
         self.machine = HierarchicalMachine(
             model=self,
@@ -343,6 +346,22 @@ class BattleController:
                 if not ctx.enemy_detected and ctx.frames_without_detection > 30:
                     self._enter_lost_target(now)
                     return self._action_lost_target(ctx, now)
+
+            # Stuck at wall — robot at wall with near-zero speed, not moving
+            # Catches cases where stall detector misses (no speed drop, just sustained zero)
+            if (current not in ("unstick", "evade_retreat", "evade_reposition", "wall_reverse", "pin")
+                    and ctx.our_detected
+                    and _near_wall(ctx.our_pos[0], ctx.our_pos[1], self.cfg.wall_threshold_cm)
+                    and self._speed_t0 < 5.0 and self._speed_t1 < 5.0
+                    and abs(ctx.throttle_cmd) > 0.2):
+                self._wall_stuck_frames += 1
+                if self._wall_stuck_frames > 30:  # ~0.5s stuck at wall
+                    self._wall_stuck_frames = 0
+                    log.info("[battle] STUCK AT WALL — reversing")
+                    self._enter_wall_reverse(ctx, now)
+                    return self._action_wall_reverse(ctx, now)
+            else:
+                self._wall_stuck_frames = 0
 
             # Stuck detection — expensive (position history scan), check last
             if (current not in ("unstick", "evade_retreat", "evade_reposition", "wall_reverse")

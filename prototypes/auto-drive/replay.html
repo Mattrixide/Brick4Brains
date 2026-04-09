@@ -720,13 +720,15 @@ function drawGrid(cw, ch) {
       ];
     }
 
-    // Find bounding box of corners in world cm to size the grid
+    // Find bounding box of corners and compute center (midpoint of width x height)
     const ccm = hasCorners ? arenaMeta.corners_cm : [[-122,-122],[122,-122],[122,122],[-122,122]];
     const minX = Math.min(...ccm.map(c => c[0]));
     const maxX = Math.max(...ccm.map(c => c[0]));
     const minY = Math.min(...ccm.map(c => c[1]));
     const maxY = Math.max(...ccm.map(c => c[1]));
-    // Snap grid range to step boundaries beyond the arena
+    const centerX = (minX + maxX) / 2;
+    const centerY = (minY + maxY) / 2;
+    // Snap grid range to step boundaries centered on arena center
     const gridMinX = Math.floor(minX / step) * step;
     const gridMaxX = Math.ceil(maxX / step) * step;
     const gridMinY = Math.floor(minY / step) * step;
@@ -763,8 +765,8 @@ function drawGrid(cw, ch) {
       drawGridPolyline(pts);
     }
 
-    // Origin crosshair (inside clip)
-    const [ox, oy] = w2c(0, 0);
+    // Center crosshair (center of width x height)
+    const [ox, oy] = w2c(centerX, centerY);
     ctx.strokeStyle = '#0f0';
     ctx.lineWidth = 2;
     ctx.beginPath(); ctx.moveTo(ox - 12, oy); ctx.lineTo(ox + 12, oy); ctx.stroke();
@@ -780,25 +782,6 @@ function drawGrid(cw, ch) {
     for (let i = 1; i < cornersPx.length; i++) ctx.lineTo(cornersPx[i][0], cornersPx[i][1]);
     ctx.closePath();
     ctx.stroke();
-
-    // ORIGIN label (outside clip so it's not cut off)
-    ctx.fillStyle = '#0f0';
-    ctx.font = 'bold 11px Consolas, monospace';
-    ctx.fillText('ORIGIN', ox + 12, oy - 10);
-
-    // Grid labels along arena edge (outside clip)
-    ctx.fillStyle = '#00b400';
-    ctx.font = '10px Consolas, monospace';
-    for (let x = gridMinX; x <= gridMaxX; x += step) {
-      if (x === 0) continue;
-      const [lx, ly] = w2c(x, gridMinY);
-      ctx.fillText(`${x}`, lx + 2, ly - 3);
-    }
-    for (let y = gridMinY; y <= gridMaxY; y += step) {
-      if (y === 0) continue;
-      const [lx, ly] = w2c(gridMinX, y);
-      ctx.fillText(`${y}`, lx + 2, ly - 3);
-    }
     return;
   }
   // Fallback: abstract dark grid

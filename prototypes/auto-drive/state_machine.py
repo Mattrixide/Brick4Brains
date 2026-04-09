@@ -185,6 +185,10 @@ class BattleController:
         # Goto center
         self._goto_center_target: tuple[float, float] | None = None
 
+        # Lost ArUco oscillation
+        self._lost_aruco_t: float = 0.0
+        self._lost_aruco_phase: int = -1
+
         # Build the HSM
         self.machine = HierarchicalMachine(
             model=self,
@@ -1156,10 +1160,10 @@ class BattleController:
     # -- Lost ArUco action --------------------------------------------------
 
     def _action_lost_aruco(self, ctx: BattleContext, now: float) -> BattleOutput:
-        """Own position lost — slow reverse to back away from wall/obstacle.
+        """Own position lost — oscillate to break free from wall, then reverse.
 
         Most common cause: marker pressed against wall during pin.
-        Reversing at low speed helps re-expose the marker to the camera.
+        Oscillating breaks free if wedged, reversing re-exposes the marker.
         """
         # ArUco re-acquired → snap back to normal
         if ctx.our_detected:
@@ -1167,9 +1171,14 @@ class BattleController:
             self._reengage(ctx)
             return BattleOutput()
 
-        # Slow reverse using IMU heading hold (straight back)
-        # This backs us away from the wall that's blocking the marker
-        return BattleOutput(target_omega_dps=0.0, target_speed=-0.2)
+        # Oscillate forward/reverse every 0.4s to break free if wedged
+        # (same principle as unstick but without position-based exit)
+        if now - self._lost_aruco_t > 0.4:
+            self._lost_aruco_phase *= -1
+            self._lost_aruco_t = now
+
+        speed = 0.3 * self._lost_aruco_phase
+        return BattleOutput(target_omega_dps=0.0, target_speed=speed)
 
     # -- Victory dance action -----------------------------------------------
 

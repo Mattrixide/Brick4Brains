@@ -1172,8 +1172,8 @@ class BattleController:
             self._reengage(ctx)
             return BattleOutput()
 
-        # Reverse straight back using gyro heading hold
-        return BattleOutput(target_omega_dps=0.0, target_speed=-0.3)
+        # Reverse straight back at half speed using gyro heading hold
+        return BattleOutput(target_omega_dps=0.0, target_speed=-0.5)
 
     # -- Victory dance action -----------------------------------------------
 

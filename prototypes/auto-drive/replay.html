@@ -714,28 +714,44 @@ function renderFrame(idx) {
     ctx.textAlign = 'start';
   }
 
-  // Pin countdown (center, large — matching CV window)
-  if (f.bs === 'pin') {
-    // Compute pin elapsed from consecutive pin frames
-    let pinStart = f.t;
-    for (let pi = idx - 1; pi >= 0; pi--) {
-      if (frames[pi].bs === 'pin') pinStart = frames[pi].t;
-      else break;
-    }
-    const pinDur = 5.0; // pin_duration_s from battle config
-    const pinRemaining = Math.max(0, pinDur - (f.t - pinStart));
-    const countText = pinRemaining.toFixed(1);
+  // Center overlay: pin countdown or phase display
+  if (f.mode === 'battle') {
+    const phase = f.mp || f.phase || '';
     ctx.textAlign = 'center';
-    // Shadow
-    ctx.fillStyle = '#000';
-    ctx.font = 'bold 72px Consolas, monospace';
-    ctx.fillText(countText, cw / 2 + 2, ch / 2 + 2);
-    // Foreground (green-yellow, BGR 0,255,100 → RGB 100,255,0)
-    ctx.fillStyle = '#64ff00';
-    ctx.fillText(countText, cw / 2, ch / 2);
-    // PINNING label
-    ctx.font = 'bold 28px Consolas, monospace';
-    ctx.fillText('PINNING', cw / 2, ch / 2 - 50);
+
+    if (f.bs === 'pin') {
+      // Pin countdown (center, large)
+      let pinStart = f.t;
+      for (let pi = idx - 1; pi >= 0; pi--) {
+        if (frames[pi].bs === 'pin') pinStart = frames[pi].t;
+        else break;
+      }
+      const pinDur = 5.0;
+      const pinRemaining = Math.max(0, pinDur - (f.t - pinStart));
+      const countText = pinRemaining.toFixed(1);
+      // Shadow
+      ctx.fillStyle = '#000';
+      ctx.font = 'bold 72px Consolas, monospace';
+      ctx.fillText(countText, cw / 2 + 2, ch / 2 + 2);
+      // Foreground
+      ctx.fillStyle = '#64ff00';
+      ctx.fillText(countText, cw / 2, ch / 2);
+      // PINNING label
+      ctx.font = 'bold 28px Consolas, monospace';
+      ctx.fillText('PINNING', cw / 2, ch / 2 - 50);
+      // Phase below
+      if (phase) {
+        ctx.font = 'bold 16px Consolas, monospace';
+        ctx.fillStyle = phaseColor(phase);
+        ctx.fillText(phase.toUpperCase(), cw / 2, ch / 2 + 45);
+      }
+    } else if (phase) {
+      // Phase display (center)
+      ctx.font = 'bold 18px Consolas, monospace';
+      ctx.fillStyle = phaseColor(phase);
+      ctx.fillText(phase.toUpperCase(), cw / 2, ch / 2);
+    }
+
     ctx.textAlign = 'start';
   }
 

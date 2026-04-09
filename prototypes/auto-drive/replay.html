@@ -692,6 +692,53 @@ function renderFrame(idx) {
   ctx.font = 'bold 11px Consolas, monospace';
   ctx.fillText(state.toUpperCase().replace(/_/g, ' '), sx + 14, sy - 14);
 
+  // Battle timer (top-right, matching CV window)
+  if (f.mr != null && f.mode === 'battle') {
+    const rem = f.mr;
+    const mins = Math.floor(rem / 60);
+    const secs = Math.floor(rem % 60);
+    const timerText = `${mins}:${secs < 10 ? '0' : ''}${secs}`;
+    const urg = f.urg || 0;
+    // BGR(0,255,255)=yellow, BGR(0,165,255)=orange, BGR(0,0,255)=red
+    const urgColor = urg < 0.5 ? '#ffff00' : urg < 0.8 ? '#ffa500' : '#ff0000';
+    ctx.fillStyle = urgColor;
+    ctx.font = 'bold 28px Consolas, monospace';
+    ctx.textAlign = 'right';
+    ctx.fillText(timerText, cw - 10, 35);
+    // Phase label below
+    const phase = f.mp || f.phase || '';
+    if (phase) {
+      ctx.font = '13px Consolas, monospace';
+      ctx.fillText(phase.toUpperCase(), cw - 10, 52);
+    }
+    ctx.textAlign = 'start';
+  }
+
+  // Pin countdown (center, large — matching CV window)
+  if (f.bs === 'pin') {
+    // Compute pin elapsed from consecutive pin frames
+    let pinStart = f.t;
+    for (let pi = idx - 1; pi >= 0; pi--) {
+      if (frames[pi].bs === 'pin') pinStart = frames[pi].t;
+      else break;
+    }
+    const pinDur = 5.0; // pin_duration_s from battle config
+    const pinRemaining = Math.max(0, pinDur - (f.t - pinStart));
+    const countText = pinRemaining.toFixed(1);
+    ctx.textAlign = 'center';
+    // Shadow
+    ctx.fillStyle = '#000';
+    ctx.font = 'bold 72px Consolas, monospace';
+    ctx.fillText(countText, cw / 2 + 2, ch / 2 + 2);
+    // Foreground (green-yellow, BGR 0,255,100 → RGB 100,255,0)
+    ctx.fillStyle = '#64ff00';
+    ctx.fillText(countText, cw / 2, ch / 2);
+    // PINNING label
+    ctx.font = 'bold 28px Consolas, monospace';
+    ctx.fillText('PINNING', cw / 2, ch / 2 - 50);
+    ctx.textAlign = 'start';
+  }
+
   // Update data panel
   updateDataPanel(f);
   updateMotorBar(f);

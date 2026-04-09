@@ -350,10 +350,14 @@ class RobotPositionKF:
 
         self.x = self.F @ self.x
 
-        # Arena bounds clamping
+        # Arena bounds clamping — use generous bounds (arena_half + 30cm margin)
+        # The robot CAN be at -142 if pressed against a wall at -122.
+        # Tight clamping at -122 creates phantom velocity (clamp to -122, then
+        # update pulls back to -142 = 20cm jump every frame = 48 cm/s phantom).
+        clamp_limit = self.arena_half + 30.0
         for i, vi in [(0, 2), (1, 3)]:
-            if abs(self.x[i]) > self.arena_half:
-                self.x[i] = np.clip(self.x[i], -self.arena_half, self.arena_half)
+            if abs(self.x[i]) > clamp_limit:
+                self.x[i] = np.clip(self.x[i], -clamp_limit, clamp_limit)
                 self.x[vi] = 0.0
 
         Q = self.Q_stationary if self._stationary else self.Q

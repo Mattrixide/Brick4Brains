@@ -347,21 +347,29 @@ class BattleController:
                     self._enter_lost_target(now)
                     return self._action_lost_target(ctx, now)
 
-            # Stuck at wall — robot at wall with near-zero speed, not moving
-            # Uses min-of-3 speed (filters phantom velocity spikes from ArUco jitter)
+            # Stuck at wall — uses position history displacement, NOT KF velocity
+            # (KF velocity has phantom readings from ArUco jitter + arena clamping)
             if (current not in ("unstick", "evade_retreat", "evade_reposition", "wall_reverse", "pin")
-                    and ctx.our_detected
-                    and _near_wall(ctx.our_pos[0], ctx.our_pos[1], self.cfg.wall_threshold_cm)
-                    and min(self._speed_t0, self._speed_t1, self._speed_t2) < 5.0
-                    and abs(ctx.throttle_cmd) > 0.2):
-                self._wall_stuck_frames += 1
-                if self._wall_stuck_frames > 30:  # ~0.5s stuck at wall
-                    self._wall_stuck_frames = 0
-                    log.info("[battle] STUCK AT WALL — reversing")
-                    self._enter_wall_reverse(ctx, now)
-                    return self._action_wall_reverse(ctx, now)
-            else:
-                self._wall_stuck_frames = 0
+                    and abs(ctx.throttle_cmd) > 0.15
+                    and len(self._last_positions) >= 10):
+                oldest = self._last_positions[0]
+                newest = self._last_positions[-1]
+                dt_pos = newest[2] - oldest[2]
+                if dt_pos > 0.5:  # need at least 0.5s of position history
+                    displacement = math.hypot(newest[0] - oldest[0], newest[1] - oldest[1])
+                    at_wall = _near_wall(newest[0], newest[1], self.cfg.wall_threshold_cm)
+                    if at_wall and displacement < 5.0:
+                        self._wall_stuck_frames += 1
+                        if self._wall_stuck_frames > 5:  # confirmed stuck (already have 0.5s of history)
+                            self._wall_stuck_frames = 0
+                            log.info("[battle] STUCK AT WALL — pos=(%.0f,%.0f) disp=%.1fcm in %.1fs",
+                                     newest[0], newest[1], displacement, dt_pos)
+                            self._enter_wall_reverse(ctx, now)
+                            return self._action_wall_reverse(ctx, now)
+                    else:
+                        self._wall_stuck_frames = 0
+                else:
+                    pass  # not enough history yet, don't reset counter
 
             # Stuck detection — expensive (position history scan), check last
             if (current not in ("unstick", "evade_retreat", "evade_reposition", "wall_reverse")

@@ -66,17 +66,32 @@ class SimRobot:
         return self.body.angular_velocity
 
     def apply_drive(self, throttle, steering, cfg):
-        """Apply forward force and steering torque."""
+        """Apply forward force and steering torque.
+        When throttle/steering is zero, ESC actively brakes (no coasting)."""
         if not self.alive:
             return
-        # Forward force in local X direction
-        force_mag = throttle * cfg.max_forward_force
-        local_force = (force_mag, 0)
-        self.body.apply_force_at_local_point(local_force, (0, 0))
+        self._throttle_input = throttle
+        self._steering_input = steering
 
-        # Steering torque
-        torque = steering * cfg.max_torque
-        self.body.torque += torque
+        if abs(throttle) > 0.01:
+            # Drive force
+            self.body.apply_force_at_local_point(
+                (throttle * cfg.max_forward_force, 0), (0, 0))
+        else:
+            # ESC braking — kill forward velocity quickly
+            vx, vy = self.body.velocity
+            cos_a = math.cos(self.body.angle)
+            sin_a = math.sin(self.body.angle)
+            v_fwd = vx * cos_a + vy * sin_a
+            # Strong braking force opposing forward motion
+            brake = -v_fwd * self.mass * 15.0  # aggressive brake
+            self.body.apply_force_at_local_point((brake, 0), (0, 0))
+
+        if abs(steering) > 0.01:
+            self.body.torque += steering * cfg.max_torque
+        else:
+            # Kill angular velocity when no steering input
+            self.body.torque += -self.body.angular_velocity * self.mass * 50.0
 
     def apply_friction_forces(self, cfg):
         """Coulomb friction opposing forward motion. Applied BEFORE substeps."""

@@ -852,21 +852,24 @@ function drawOurRobot(f) {
 function drawEnemy(f) {
   const [cx, cy] = w2c(f.ex, f.ey);
 
-  // Raw detection box (yellow — drawn at raw detection position, not Kalman)
-  // BGR(0,255,255) = yellow in RGB
-  if ($('chk-ebox').checked && f.ed && f.eb) {
-    drawPolygon(f.eb, '#ff0', 2);
-    // Crosshair + label at center of raw detection box
-    const ebCx = f.eb.reduce((s, p) => s + p[0], 0) / f.eb.length;
-    const ebCy = f.eb.reduce((s, p) => s + p[1], 0) / f.eb.length;
-    const [dcx, dcy] = w2c(ebCx, ebCy);
+  // Raw detection targeting box (yellow, ±40px equivalent)
+  // Uses edx/edy (raw detection cm) if available, falls back to ex/ey
+  if ($('chk-ebox').checked && f.ed) {
+    const rdx = f.edx != null ? f.edx : f.ex;
+    const rdy = f.edy != null ? f.edy : f.ey;
+    const [dcx, dcy] = w2c(rdx, rdy);
+    const boxHalf = 20;
     ctx.strokeStyle = '#ff0';
+    ctx.lineWidth = 2;
+    ctx.strokeRect(dcx - boxHalf, dcy - boxHalf, boxHalf * 2, boxHalf * 2);
+    // Crosshair
     ctx.lineWidth = 1;
     ctx.beginPath(); ctx.moveTo(dcx - 10, dcy); ctx.lineTo(dcx + 10, dcy); ctx.stroke();
     ctx.beginPath(); ctx.moveTo(dcx, dcy - 10); ctx.lineTo(dcx, dcy + 10); ctx.stroke();
+    // ENEMY label
     ctx.fillStyle = '#ff0';
     ctx.font = '11px Consolas, monospace';
-    ctx.fillText('ENEMY', dcx + 25, dcy - 5);
+    ctx.fillText('ENEMY', dcx + boxHalf + 5, dcy - 5);
   }
 
   // Kalman tracking circle (red, 10px radius, stroke)

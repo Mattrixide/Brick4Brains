@@ -728,11 +728,11 @@ function drawGrid(cw, ch) {
     const maxY = Math.max(...ccm.map(c => c[1]));
     const centerX = (minX + maxX) / 2;
     const centerY = (minY + maxY) / 2;
-    // Snap grid range to step boundaries centered on arena center
-    const gridMinX = Math.floor(minX / step) * step;
-    const gridMaxX = Math.ceil(maxX / step) * step;
-    const gridMinY = Math.floor(minY / step) * step;
-    const gridMaxY = Math.ceil(maxY / step) * step;
+    // Snap grid range to step boundaries offset from arena center
+    const gridMinX = centerX - Math.ceil((centerX - minX) / step) * step;
+    const gridMaxX = centerX + Math.ceil((maxX - centerX) / step) * step;
+    const gridMinY = centerY - Math.ceil((centerY - minY) / step) * step;
+    const gridMaxY = centerY + Math.ceil((maxY - centerY) / step) * step;
 
     // Clip grid drawing to arena polygon
     ctx.save();
@@ -742,22 +742,22 @@ function drawGrid(cw, ch) {
     ctx.closePath();
     ctx.clip();
 
-    // Vertical lines (constant x, varying y)
+    // Vertical lines centered on arena center
     for (let x = gridMinX; x <= gridMaxX; x += step) {
-      const isAxis = x === 0;
-      ctx.strokeStyle = isAxis ? '#00c800' : '#006400';
-      ctx.lineWidth = isAxis ? 2 : 1;
+      const isCenter = Math.abs(x - centerX) < 1;
+      ctx.strokeStyle = isCenter ? '#00c800' : '#006400';
+      ctx.lineWidth = isCenter ? 2 : 1;
       const pts = [];
       for (let y = gridMinY; y <= gridMaxY; y += sampleStep) {
         pts.push(w2c(x, y));
       }
       drawGridPolyline(pts);
     }
-    // Horizontal lines (constant y, varying x)
+    // Horizontal lines centered on arena center
     for (let y = gridMinY; y <= gridMaxY; y += step) {
-      const isAxis = y === 0;
-      ctx.strokeStyle = isAxis ? '#00c800' : '#006400';
-      ctx.lineWidth = isAxis ? 2 : 1;
+      const isCenter = Math.abs(y - centerY) < 1;
+      ctx.strokeStyle = isCenter ? '#00c800' : '#006400';
+      ctx.lineWidth = isCenter ? 2 : 1;
       const pts = [];
       for (let x = gridMinX; x <= gridMaxX; x += sampleStep) {
         pts.push(w2c(x, y));

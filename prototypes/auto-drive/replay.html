@@ -745,11 +745,6 @@ function renderFrame(idx) {
         ctx.fillStyle = phaseColor(phase);
         ctx.fillText(phase.toUpperCase(), cw / 2, ch / 2 + 45);
       }
-    } else if (phase) {
-      // Phase display (center)
-      ctx.font = 'bold 18px Consolas, monospace';
-      ctx.fillStyle = phaseColor(phase);
-      ctx.fillText(phase.toUpperCase(), cw / 2, ch / 2);
     }
 
     ctx.textAlign = 'start';

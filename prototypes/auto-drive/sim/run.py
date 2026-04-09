@@ -13,6 +13,7 @@ import pygame
 from sim.arena import SimArena
 from sim.renderer import SimRenderer
 from sim.config import SimConfig
+from sim.bridge import SimBridge
 
 
 def main():
@@ -28,6 +29,9 @@ def main():
     renderer = SimRenderer(arena)
 
     paused = True
+    brick_ai = False
+    match_started = False
+    brick_bridge = SimBridge(arena.brick, cfg)
     font = pygame.font.SysFont("consolas", 14)
     font_large = pygame.font.SysFont("consolas", 18)
 
@@ -42,26 +46,36 @@ def main():
                     running = False
                 elif event.key == pygame.K_SPACE:
                     paused = not paused
+                elif event.key == pygame.K_b:
+                    brick_ai = not brick_ai
                 elif event.key == pygame.K_r:
                     arena.reset()
+                    brick_bridge.reset()
+                    match_started = False
                     paused = True
 
         # --- Input + Physics (only when running) ---
         if not paused:
             keys = pygame.key.get_pressed()
 
-            # Brick: WASD
-            brick_throttle = 0.0
-            brick_steering = 0.0
-            if keys[pygame.K_w]:
-                brick_throttle = 1.0
-            elif keys[pygame.K_s]:
-                brick_throttle = -1.0
-            if keys[pygame.K_a]:
-                brick_steering = 1.0
-            elif keys[pygame.K_d]:
-                brick_steering = -1.0
-            arena.brick.apply_drive(brick_throttle, brick_steering, arena.cfg)
+            # Brick: AI or WASD
+            if brick_ai:
+                if not match_started:
+                    brick_bridge.start_match()
+                    match_started = True
+                brick_bridge.tick(1.0 / cfg.render_fps, arena.enemy)
+            else:
+                brick_throttle = 0.0
+                brick_steering = 0.0
+                if keys[pygame.K_w]:
+                    brick_throttle = 1.0
+                elif keys[pygame.K_s]:
+                    brick_throttle = -1.0
+                if keys[pygame.K_a]:
+                    brick_steering = 1.0
+                elif keys[pygame.K_d]:
+                    brick_steering = -1.0
+                arena.brick.apply_drive(brick_throttle, brick_steering, arena.cfg)
 
             # Enemy: Arrow keys
             enemy_throttle = 0.0
@@ -88,6 +102,12 @@ def main():
         label = font_large.render(state_text, True, state_color)
         screen.blit(label, (10, 10))
 
+        # AI state
+        if brick_ai:
+            ai_text = f"AI: {brick_bridge.state}"
+            ai_label = font.render(ai_text, True, (0, 200, 255))
+            screen.blit(ai_label, (10, 75))
+
         # Robot speeds
         bv = arena.brick.velocity
         brick_speed = math.sqrt(bv[0] ** 2 + bv[1] ** 2)
@@ -107,7 +127,7 @@ def main():
 
         # Controls hint
         hint = font.render(
-            "WASD=Brick  Arrows=Enemy  Space=Pause  R=Reset  Esc=Quit",
+            "WASD=Brick  Arrows=Enemy  B=AI  Space=Pause  R=Reset  Esc=Quit",
             True, (140, 140, 140),
         )
         screen.blit(hint, (10, win_size - 25))

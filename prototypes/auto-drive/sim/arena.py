@@ -84,7 +84,7 @@ class SimRobot:
             sin_a = math.sin(self.body.angle)
             v_fwd = vx * cos_a + vy * sin_a
             # Strong braking force opposing forward motion
-            brake = -v_fwd * self.mass * 15.0  # aggressive brake
+            brake = -v_fwd * self.mass * 40.0  # aggressive ESC brake
             self.body.apply_force_at_local_point((brake, 0), (0, 0))
 
         if abs(steering) > 0.01:

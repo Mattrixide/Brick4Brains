@@ -48,9 +48,24 @@ class SimBridge:
         self._pin_timer = PinTimer(max_duration_s=bc.pin_duration_s)
         self.controller = BattleController(bc, self.match_timer, self._pin_timer)
 
-    def start_match(self):
-        """Start the match timer."""
+    def start_match(self, enemy: SimRobot):
+        """Start the match timer and transition controller out of 'wait'."""
         self.match_timer.start()
+        # Build a context so controller.start_match can decide opening strategy
+        ox, oy = self.robot.position
+        ex, ey = enemy.position
+        ctx = BattleContext(
+            our_pos=(ox, oy),
+            our_heading_rad=self.robot.heading_rad,
+            our_velocity=(0, 0),
+            enemy_pos=(ex, ey) if enemy.alive else None,
+            enemy_detected=enemy.alive,
+            enemy_tracking=enemy.alive,
+            distance_cm=math.hypot(ex - ox, ey - oy) if enemy.alive else 999.0,
+            dt=0.016,
+            our_detected=True,
+        )
+        self.controller.start_match(ctx)
 
     def reset(self):
         """Recreate controller and timers from config."""

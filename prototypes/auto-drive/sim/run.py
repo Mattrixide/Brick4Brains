@@ -61,7 +61,7 @@ def main():
             # Brick: AI or WASD
             if brick_ai:
                 if not match_started:
-                    brick_bridge.start_match()
+                    brick_bridge.start_match(arena.enemy)
                     match_started = True
                 brick_bridge.tick(1.0 / cfg.render_fps, arena.enemy)
             else:

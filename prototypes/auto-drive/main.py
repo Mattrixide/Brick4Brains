@@ -1426,6 +1426,19 @@ class AutoDriveApp:
                     arena_meta["frame_h"] = int(frame_shape[0])
                     with open(arena_meta_path, "w") as amf:
                         json.dump(arena_meta, amf, indent=2)
+                    # Copy arena snapshot (from 'r' key) for replay overlay
+                    arena_png_path = log_path.replace(".jsonl", "_arena.png")
+                    snap_path = os.path.join(
+                        os.path.dirname(os.path.abspath(__file__)),
+                        "arena_snapshot.png"
+                    )
+                    if os.path.exists(snap_path):
+                        import shutil
+                        shutil.copy2(snap_path, arena_png_path)
+                        print(f"[log] Arena image: {arena_png_path}")
+                    elif frame is not None:
+                        cv2.imwrite(arena_png_path, frame)
+                        print(f"[log] Arena image (live frame): {arena_png_path}")
                     print(f"[log] Arena meta: {arena_meta_path}")
 
                 e_pos = self._enemy_tracker.position_cm if self._enemy_tracker.is_tracking else None

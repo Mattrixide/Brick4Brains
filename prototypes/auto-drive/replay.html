@@ -307,6 +307,7 @@
 // ======================================================================
 const STATE_COLORS = {
   // Current states
+  ready:            '#444444',
   wait:             '#555555',
   goto_center:      '#446688',
   acquire:          '#00c8ff',
@@ -414,6 +415,26 @@ function loadFiles(fileList) {
     const r = new FileReader();
     r.onload = () => {
       frames = r.result.trim().split('\n').map(line => JSON.parse(line));
+      // Normalize timestamps to relative time (real logs use time.perf_counter() absolutes)
+      if (frames.length > 0) {
+        const t0 = frames[0].t;
+        if (t0 > 1000) { // absolute timestamps — normalize to start at 0
+          for (const f of frames) f.t = f.t - t0;
+        }
+        // Merge 'phase' field into 'mp' if mp is null (logger writes both)
+        for (const f of frames) {
+          if (f.mp == null && f.phase != null) f.mp = f.phase;
+        }
+        // Fill in last-known-good position when od=False (ArUco lost → ox/oy default to 0,0)
+        let lastGoodX = null, lastGoodY = null, lastGoodH = null;
+        for (const f of frames) {
+          if (f.od) {
+            lastGoodX = f.ox; lastGoodY = f.oy; lastGoodH = f.oh;
+          } else if (lastGoodX != null) {
+            f.ox = lastGoodX; f.oy = lastGoodY; f.oh = lastGoodH;
+          }
+        }
+      }
       resolve();
     };
     r.readAsText(jsonlFile);
@@ -496,9 +517,23 @@ const ARENA_W = 244; // cm
 const ARENA_H = 244;
 const PAD = 30; // cm padding around arena
 
+function useCameraView() {
+  return arenaImage && arenaMeta && arenaMeta.inv_homography;
+}
+
+// Image-space helpers (cached on resize)
+let _imgScale = 1, _imgOffX = 0, _imgOffY = 0, _imgW = 1280, _imgH = 800;
+
 function resizeCanvas() {
   const wrap = $('arena-wrap');
-  const aspect = (ARENA_W + PAD*2) / (ARENA_H + PAD*2);
+  let aspect;
+  if (useCameraView()) {
+    _imgW = arenaMeta.frame_w || arenaImage.naturalWidth;
+    _imgH = arenaMeta.frame_h || arenaImage.naturalHeight;
+    aspect = _imgW / _imgH;
+  } else {
+    aspect = (ARENA_W + PAD*2) / (ARENA_H + PAD*2);
+  }
   let w = wrap.clientWidth;
   let h = wrap.clientHeight;
   if (w / h > aspect) { w = h * aspect; } else { h = w / aspect; }
@@ -507,6 +542,12 @@ function resizeCanvas() {
   canvas.style.width = Math.floor(w) + 'px';
   canvas.style.height = Math.floor(h) + 'px';
   ctx.setTransform(devicePixelRatio, 0, 0, devicePixelRatio, 0, 0);
+  // Cache image-to-canvas scaling
+  const cw = canvas.width / devicePixelRatio;
+  const ch = canvas.height / devicePixelRatio;
+  _imgScale = Math.min(cw / _imgW, ch / _imgH);
+  _imgOffX = (cw - _imgW * _imgScale) / 2;
+  _imgOffY = (ch - _imgH * _imgScale) / 2;
   // Also size state bar
   stateBarCanvas.width = $('state-bar-wrap').clientWidth * devicePixelRatio;
   stateBarCanvas.height = 16 * devicePixelRatio;
@@ -519,12 +560,21 @@ window.addEventListener('resize', resizeCanvas);
 
 // World cm -> canvas px
 function w2c(x_cm, y_cm) {
+  if (useCameraView()) {
+    // World cm → image pixels via inv_homography, then scale to canvas
+    const H = arenaMeta.inv_homography;
+    const w = H[2][0] * x_cm + H[2][1] * y_cm + H[2][2];
+    const u = (H[0][0] * x_cm + H[0][1] * y_cm + H[0][2]) / w;
+    const v = (H[1][0] * x_cm + H[1][1] * y_cm + H[1][2]) / w;
+    return [_imgOffX + u * _imgScale, _imgOffY + v * _imgScale];
+  }
+  // Fallback: abstract top-down view
   const cw = canvas.width / devicePixelRatio;
   const ch = canvas.height / devicePixelRatio;
   const scale = Math.min(cw / (ARENA_W + PAD*2), ch / (ARENA_H + PAD*2));
   const cx = cw / 2;
   const cy = ch / 2;
-  return [cx + x_cm * scale, cy - y_cm * scale]; // y-up in world, y-down on canvas
+  return [cx + x_cm * scale, cy - y_cm * scale];
 }
 
 function renderFrame(idx) {
@@ -536,8 +586,14 @@ function renderFrame(idx) {
 
   ctx.clearRect(0, 0, cw, ch);
 
-  // Arena camera image background
-  if ($('chk-arena').checked && arenaImage && arenaMeta) {
+  // Background
+  if (useCameraView()) {
+    if ($('chk-arena').checked) {
+      ctx.globalAlpha = 0.5;
+      ctx.drawImage(arenaImage, _imgOffX, _imgOffY, _imgW * _imgScale, _imgH * _imgScale);
+      ctx.globalAlpha = 1;
+    }
+  } else if ($('chk-arena').checked && arenaImage && arenaMeta) {
     try { drawArenaImage(cw, ch); } catch(e) { console.warn('Arena draw error:', e); }
   }
 
@@ -547,49 +603,34 @@ function renderFrame(idx) {
   // Pit overlay
   if ($('chk-pit').checked && arenaMeta && (arenaMeta.pit_x_cm || arenaMeta.pit_y_cm)) drawPit();
 
-  // Arena border
-  const [ax1, ay1] = w2c(-ARENA_W/2, ARENA_H/2);
-  const [ax2, ay2] = w2c(ARENA_W/2, -ARENA_H/2);
-  ctx.strokeStyle = '#333';
-  ctx.lineWidth = 2;
-  ctx.strokeRect(ax1, ay1, ax2-ax1, ay2-ay1);
-  ctx.strokeStyle = '#222';
-  ctx.lineWidth = 1;
-  // Center cross
-  const [ox, oy] = w2c(0, 0);
-  ctx.beginPath(); ctx.moveTo(ox-8, oy); ctx.lineTo(ox+8, oy); ctx.stroke();
-  ctx.beginPath(); ctx.moveTo(ox, oy-8); ctx.lineTo(ox, oy+8); ctx.stroke();
+  if (!useCameraView()) {
+    // Arena border (abstract view only)
+    const [ax1, ay1] = w2c(-ARENA_W/2, ARENA_H/2);
+    const [ax2, ay2] = w2c(ARENA_W/2, -ARENA_H/2);
+    ctx.strokeStyle = '#333';
+    ctx.lineWidth = 2;
+    ctx.strokeRect(ax1, ay1, ax2-ax1, ay2-ay1);
+    ctx.strokeStyle = '#222';
+    ctx.lineWidth = 1;
+    const [ox, oy] = w2c(0, 0);
+    ctx.beginPath(); ctx.moveTo(ox-8, oy); ctx.lineTo(ox+8, oy); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(ox, oy-8); ctx.lineTo(ox, oy+8); ctx.stroke();
+  }
 
   // Trails
   if ($('chk-trail').checked) {
-    // Trail window: show last 3 seconds of trail up to current frame
     const trailStart = Math.max(0, findFrameAtTime(f.t - 3.0));
     drawTrail(trailStart, idx, 'ox', 'oy', '#0f04', '#0f0');
     drawTrail(trailStart, idx, 'ex', 'ey', '#f004', '#f00');
   }
 
-  // Enemy
+  // --- Enemy overlay (matches enemy_tracker.py draw_overlay) ---
   if (f.ex != null && f.ey != null) {
-    drawRobot(f.ex, f.ey, f.eh, f.evx||0, f.evy||0, '#f44', '#f88', f.ed);
+    drawEnemy(f);
   }
 
-  // Our robot
-  drawRobot(f.ox, f.oy, f.oh, f.ovx||0, f.ovy||0, '#0f0', '#8f8', f.od);
-
-  // ArUco marker box (green)
-  if (f.ab) {
-    drawPolygon(f.ab, '#0f0', 2);
-  }
-
-  // Robot footprint mask (magenta polygon)
-  if ($('chk-footprint').checked && f.fp) {
-    drawPolygon(f.fp, '#f0f', 1.5);
-  }
-
-  // Enemy detection box (cyan)
-  if ($('chk-ebox').checked && f.eb) {
-    drawPolygon(f.eb, '#0ff', 1.5);
-  }
+  // --- Our robot overlay (matches tracker.py draw_overlay) ---
+  drawOurRobot(f);
 
   // Distance line
   if (f.ex != null && f.dist < 900) {
@@ -600,11 +641,6 @@ function renderFrame(idx) {
     ctx.lineWidth = 1;
     ctx.beginPath(); ctx.moveTo(rx, ry); ctx.lineTo(ex, ey); ctx.stroke();
     ctx.setLineDash([]);
-    // Distance label at midpoint
-    const mx = (rx+ex)/2, my = (ry+ey)/2;
-    ctx.fillStyle = '#aaa';
-    ctx.font = '11px Consolas, monospace';
-    ctx.fillText(`${f.dist.toFixed(0)}cm`, mx+4, my-4);
   }
 
   // State badge on arena
@@ -626,6 +662,46 @@ function renderFrame(idx) {
 }
 
 function drawGrid(cw, ch) {
+  if (useCameraView()) {
+    // Perspective grid matching CV window — green lines, sampled for smooth curves
+    const range = 150;
+    const step = 30;
+    const sampleStep = 10;
+    ctx.globalAlpha = 0.7;
+    for (let x = -range; x <= range; x += step) {
+      const isAxis = x === 0;
+      ctx.strokeStyle = isAxis ? '#00c800' : '#006400';
+      ctx.lineWidth = isAxis ? 2 : 1;
+      ctx.beginPath();
+      let first = true;
+      for (let y = -range; y <= range; y += sampleStep) {
+        const [px, py] = w2c(x, y);
+        if (first) { ctx.moveTo(px, py); first = false; } else ctx.lineTo(px, py);
+      }
+      ctx.stroke();
+    }
+    for (let y = -range; y <= range; y += step) {
+      const isAxis = y === 0;
+      ctx.strokeStyle = isAxis ? '#00c800' : '#006400';
+      ctx.lineWidth = isAxis ? 2 : 1;
+      ctx.beginPath();
+      let first = true;
+      for (let x = -range; x <= range; x += sampleStep) {
+        const [px, py] = w2c(x, y);
+        if (first) { ctx.moveTo(px, py); first = false; } else ctx.lineTo(px, py);
+      }
+      ctx.stroke();
+    }
+    // Origin crosshair
+    const [ox, oy] = w2c(0, 0);
+    ctx.strokeStyle = '#00c800';
+    ctx.lineWidth = 2;
+    ctx.beginPath(); ctx.moveTo(ox - 12, oy); ctx.lineTo(ox + 12, oy); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(ox, oy - 12); ctx.lineTo(ox, oy + 12); ctx.stroke();
+    ctx.globalAlpha = 1;
+    return;
+  }
+  // Fallback: abstract dark grid
   ctx.strokeStyle = '#181818';
   ctx.lineWidth = 0.5;
   for (let x = -120; x <= 120; x += 30) {
@@ -641,118 +717,24 @@ function drawGrid(cw, ch) {
 }
 
 function drawArenaImage(cw, ch) {
-  // Map the camera image onto the arena canvas.
-  // We sample a grid of world-space points, find their pixel coords in the image
-  // using the inverse homography, then draw the image warped to the canvas.
-  //
-  // Approach: draw the image with a perspective transform approximation.
-  // We map the 4 arena corners from world cm → image pixels → canvas pixels,
-  // then use canvas drawImage with a clip path for each triangle.
-
-  if (!arenaMeta) return;
-  const meta = arenaMeta;
-
-  // Use inv_homography to map world cm → image pixels
-  // H * [x_cm, y_cm, 1]^T = [u*w, v*w, w]^T  → u = u*w/w, v = v*w/w
-  function cmToImagePx(x_cm, y_cm) {
-    if (meta.inv_homography) {
-      const H = meta.inv_homography;
-      const w = H[2][0] * x_cm + H[2][1] * y_cm + H[2][2];
-      const u = (H[0][0] * x_cm + H[0][1] * y_cm + H[0][2]) / w;
-      const v = (H[1][0] * x_cm + H[1][1] * y_cm + H[1][2]) / w;
-      return [u, v];
-    }
-    // Fallback: simple scale
-    const u = meta.origin_x + x_cm * meta.px_per_cm;
-    const v = meta.origin_y + y_cm * meta.px_per_cm;
-    return [u, v];
-  }
-
-  // Draw the arena image by subdividing into a grid of quads and texturing each.
-  // This gives a reasonable perspective warp approximation.
-  const SUBDIV = 12;
-  const halfW = ARENA_W / 2;
-  const halfH = ARENA_H / 2;
-  const stepX = ARENA_W / SUBDIV;
-  const stepY = ARENA_H / SUBDIV;
-  const imgW = arenaImage.naturalWidth;
-  const imgH = arenaImage.naturalHeight;
-
-  ctx.save();
-  ctx.globalAlpha = 0.4;
-
-  for (let gy = 0; gy < SUBDIV; gy++) {
-    for (let gx = 0; gx < SUBDIV; gx++) {
-      // World corners of this cell
-      const x0 = -halfW + gx * stepX;
-      const y0 = halfH - gy * stepY;     // top-left in world (y-up)
-      const x1 = x0 + stepX;
-      const y1 = y0 - stepY;              // bottom-right in world
-
-      // Canvas coordinates
-      const [cx0, cy0] = w2c(x0, y0);
-      const [cx1, cy1] = w2c(x1, y0);
-      const [cx2, cy2] = w2c(x1, y1);
-      const [cx3, cy3] = w2c(x0, y1);
-
-      // Image pixel coordinates
-      const [u0, v0] = cmToImagePx(x0, y0);
-      const [u1, v1] = cmToImagePx(x1, y0);
-      const [u2, v2] = cmToImagePx(x1, y1);
-      const [u3, v3] = cmToImagePx(x0, y1);
-
-      // Draw two triangles per quad using affine texture mapping
-      drawTexturedTriangle(
-        cx0, cy0, cx1, cy1, cx2, cy2,
-        u0, v0, u1, v1, u2, v2, imgW, imgH
-      );
-      drawTexturedTriangle(
-        cx0, cy0, cx2, cy2, cx3, cy3,
-        u0, v0, u2, v2, u3, v3, imgW, imgH
-      );
-    }
-  }
-  ctx.globalAlpha = 1;
-  ctx.restore();
+  // Legacy abstract-view warp (only used when no homography)
+  if (!arenaMeta || !arenaMeta.inv_homography) return;
 }
 
-function drawTexturedTriangle(
-  x0, y0, x1, y1, x2, y2,  // canvas coords
-  u0, v0, u1, v1, u2, v2,  // image coords
-  imgW, imgH
-) {
-  // Affine texture mapping using canvas transforms
-  ctx.save();
+function drawPitPoly(cx_cm, cy_cm, half, style, width, dash) {
+  const corners = [
+    w2c(cx_cm - half, cy_cm + half), w2c(cx_cm + half, cy_cm + half),
+    w2c(cx_cm + half, cy_cm - half), w2c(cx_cm - half, cy_cm - half)
+  ];
+  ctx.strokeStyle = style;
+  ctx.lineWidth = width;
+  ctx.setLineDash(dash);
   ctx.beginPath();
-  ctx.moveTo(x0, y0);
-  ctx.lineTo(x1, y1);
-  ctx.lineTo(x2, y2);
+  ctx.moveTo(corners[0][0], corners[0][1]);
+  for (let i = 1; i < 4; i++) ctx.lineTo(corners[i][0], corners[i][1]);
   ctx.closePath();
-  ctx.clip();
-
-  // Solve affine: [x] = [a c e] [u]
-  //               [y]   [b d f] [v]
-  //                              [1]
-  const denom = (u0*(v1 - v2) + u1*(v2 - v0) + u2*(v0 - v1));
-  if (Math.abs(denom) < 0.001) { ctx.restore(); return; }
-
-  const a = (x0*(v1-v2) + x1*(v2-v0) + x2*(v0-v1)) / denom;
-  const b = (y0*(v1-v2) + y1*(v2-v0) + y2*(v0-v1)) / denom;
-  const c = (x0*(u2-u1) + x1*(u0-u2) + x2*(u1-u0)) / denom;
-  const d = (y0*(u2-u1) + y1*(u0-u2) + y2*(u1-u0)) / denom;
-  const e = (x0*(u1*v2-u2*v1) + x1*(u2*v0-u0*v2) + x2*(u0*v1-u1*v0)) / denom;
-  const f = (y0*(u1*v2-u2*v1) + y1*(u2*v0-u0*v2) + y2*(u0*v1-u1*v0)) / denom;
-
-  // Check for degenerate transform
-  if (!isFinite(a) || !isFinite(b) || !isFinite(c) || !isFinite(d) || !isFinite(e) || !isFinite(f)) {
-    ctx.restore();
-    return;
-  }
-  const dpr = devicePixelRatio;
-  ctx.setTransform(a * dpr, b * dpr, c * dpr, d * dpr, e * dpr, f * dpr);
-  ctx.drawImage(arenaImage, 0, 0);
-  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-  ctx.restore();
+  ctx.stroke();
+  ctx.setLineDash([]);
 }
 
 function drawPit() {
@@ -762,24 +744,12 @@ function drawPit() {
   const r = arenaMeta.pit_radius_cm;
   if (!r) return;
 
-  // Draw pit square
-  const [x1, y1] = w2c(px - r, py + r);
-  const [x2, y2] = w2c(px + r, py - r);
-  ctx.strokeStyle = '#f00';
-  ctx.lineWidth = 2;
-  ctx.setLineDash([6, 4]);
-  ctx.strokeRect(x1, y1, x2 - x1, y2 - y1);
-  ctx.setLineDash([]);
+  // Pit square (perspective-correct polygon)
+  drawPitPoly(px, py, r, '#f00', 2, [6, 4]);
 
   // Danger radius
   const dr = arenaMeta.pit_danger_radius_cm || r + 15;
-  const [dx1, dy1] = w2c(px - dr, py + dr);
-  const [dx2, dy2] = w2c(px + dr, py - dr);
-  ctx.strokeStyle = '#f004';
-  ctx.lineWidth = 1;
-  ctx.setLineDash([3, 3]);
-  ctx.strokeRect(dx1, dy1, dx2 - dx1, dy2 - dy1);
-  ctx.setLineDash([]);
+  drawPitPoly(px, py, dr, '#f004', 1, [3, 3]);
 
   // Label
   const [cx, cy] = w2c(px, py);
@@ -823,68 +793,120 @@ function drawTrail(startIdx, endIdx, xKey, yKey, fadeColor, solidColor) {
   ctx.globalAlpha = 1;
 }
 
-function drawRobot(x, y, heading, vx, vy, color, lightColor, detected) {
-  const [cx, cy] = w2c(x, y);
-  const scale = getScale();
-  const r = 8;
-
-  // Body circle
+// --- Arrow helper (like cv2.arrowedLine with tipLength=0.3) ---
+function drawArrowLine(x1, y1, x2, y2, color, width) {
+  const dx = x2 - x1, dy = y2 - y1;
+  const len = Math.hypot(dx, dy);
+  if (len < 1) return;
+  ctx.strokeStyle = color;
+  ctx.lineWidth = width;
+  ctx.beginPath(); ctx.moveTo(x1, y1); ctx.lineTo(x2, y2); ctx.stroke();
+  // Arrowhead (30% of length, matching cv2.arrowedLine tipLength=0.3)
+  const tipLen = len * 0.3;
+  const angle = Math.atan2(dy, dx);
   ctx.beginPath();
-  ctx.arc(cx, cy, r, 0, Math.PI * 2);
-  ctx.fillStyle = detected ? color : '#555';
-  ctx.fill();
-  ctx.strokeStyle = detected ? lightColor : '#777';
-  ctx.lineWidth = 1.5;
+  ctx.moveTo(x2, y2);
+  ctx.lineTo(x2 - tipLen * Math.cos(angle - 0.4), y2 - tipLen * Math.sin(angle - 0.4));
+  ctx.moveTo(x2, y2);
+  ctx.lineTo(x2 - tipLen * Math.cos(angle + 0.4), y2 - tipLen * Math.sin(angle + 0.4));
   ctx.stroke();
+}
 
-  // Heading arrow
-  if ($('chk-heading').checked && heading != null) {
-    const hx = cx + Math.cos(-heading) * (r + 10); // negate because canvas y is flipped
-    const hy = cy + Math.sin(-heading) * (r + 10);
-    // Actually: heading is math convention (CCW from +x), canvas has y-down
-    // w2c flips y, so heading arrow direction:
-    const ax = cx + Math.cos(heading) * (r + 10) * 1; // in world frame
-    // We need to convert the heading direction to canvas direction
-    const hdx = Math.cos(heading);
-    const hdy = Math.sin(heading);
-    // In canvas: x stays, y flips
-    const cdx = hdx;
-    const cdy = -hdy;
-    const tipX = cx + cdx * (r + 12);
-    const tipY = cy + cdy * (r + 12);
-    ctx.strokeStyle = detected ? lightColor : '#666';
-    ctx.lineWidth = 2;
-    ctx.beginPath(); ctx.moveTo(cx, cy); ctx.lineTo(tipX, tipY); ctx.stroke();
-    // Arrowhead
-    const angle = Math.atan2(cdy, cdx);
-    ctx.beginPath();
-    ctx.moveTo(tipX, tipY);
-    ctx.lineTo(tipX - 5*Math.cos(angle - 0.5), tipY - 5*Math.sin(angle - 0.5));
-    ctx.lineTo(tipX - 5*Math.cos(angle + 0.5), tipY - 5*Math.sin(angle + 0.5));
-    ctx.closePath();
-    ctx.fillStyle = detected ? lightColor : '#666';
-    ctx.fill();
+// --- Our robot: green ArUco box, red center dot, blue heading arrow (tracker.py) ---
+function drawOurRobot(f) {
+  // ArUco marker bounding box (green polyline)
+  if (f.ab) {
+    drawPolygon(f.ab, '#0f0', 2);
   }
 
-  // Velocity vector
-  if ($('chk-velocity').checked && vx != null && vy != null) {
-    const speed = Math.hypot(vx, vy);
-    if (speed > 2) { // only show if moving
-      const vScale = 0.5 * scale; // scale velocity to pixels
-      const vex = cx + vx * vScale;
-      const vey = cy - vy * vScale; // y flip
-      ctx.strokeStyle = '#ff0';
-      ctx.lineWidth = 1;
-      ctx.setLineDash([2, 2]);
-      ctx.beginPath(); ctx.moveTo(cx, cy); ctx.lineTo(vex, vey); ctx.stroke();
-      ctx.setLineDash([]);
-    }
+  // Robot footprint mask (magenta polygon)
+  if ($('chk-footprint').checked && f.fp) {
+    drawPolygon(f.fp, '#f0f', 2);
+  }
+
+  const [cx, cy] = w2c(f.ox, f.oy);
+
+  // Center dot (red filled, 5px)
+  ctx.beginPath();
+  ctx.arc(cx, cy, 5, 0, Math.PI * 2);
+  ctx.fillStyle = f.od ? '#f00' : '#555';
+  ctx.fill();
+
+  // Heading arrow (blue, ~50px equivalent)
+  if ($('chk-heading').checked && f.oh != null) {
+    const arrowCm = 8;
+    const [hx, hy] = w2c(f.ox + Math.cos(f.oh) * arrowCm, f.oy + Math.sin(f.oh) * arrowCm);
+    drawArrowLine(cx, cy, hx, hy, f.od ? '#00f' : '#444', 2);
+  }
+
+  // Position text
+  if (f.od) {
+    ctx.fillStyle = '#fff';
+    ctx.font = '11px Consolas, monospace';
+    const hdeg = (f.oh * 180 / Math.PI).toFixed(1);
+    ctx.fillText(`(${f.ox.toFixed(0)}, ${f.oy.toFixed(0)}) ${hdeg}\u00B0`, cx + 10, cy - 10);
   }
 }
 
-function getScale() {
-  const cw = canvas.width / devicePixelRatio;
-  return cw / (ARENA_W + PAD*2);
+// --- Enemy: yellow targeting box + crosshair, red Kalman circle, heading arrow (enemy_tracker.py) ---
+function drawEnemy(f) {
+  const [cx, cy] = w2c(f.ex, f.ey);
+
+  // Raw detection box (yellow — drawn at raw detection position, not Kalman)
+  // BGR(0,255,255) = yellow in RGB
+  if ($('chk-ebox').checked && f.ed && f.eb) {
+    drawPolygon(f.eb, '#ff0', 2);
+    // Crosshair + label at center of raw detection box
+    const ebCx = f.eb.reduce((s, p) => s + p[0], 0) / f.eb.length;
+    const ebCy = f.eb.reduce((s, p) => s + p[1], 0) / f.eb.length;
+    const [dcx, dcy] = w2c(ebCx, ebCy);
+    ctx.strokeStyle = '#ff0';
+    ctx.lineWidth = 1;
+    ctx.beginPath(); ctx.moveTo(dcx - 10, dcy); ctx.lineTo(dcx + 10, dcy); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(dcx, dcy - 10); ctx.lineTo(dcx, dcy + 10); ctx.stroke();
+    ctx.fillStyle = '#ff0';
+    ctx.font = '11px Consolas, monospace';
+    ctx.fillText('ENEMY', dcx + 25, dcy - 5);
+  }
+
+  // Kalman tracking circle (red, 10px radius, stroke)
+  if (f.et) {
+    ctx.beginPath();
+    ctx.arc(cx, cy, 10, 0, Math.PI * 2);
+    ctx.strokeStyle = '#f00';
+    ctx.lineWidth = 2;
+    ctx.stroke();
+
+    // Distance label (red)
+    if (f.dist < 900) {
+      ctx.fillStyle = '#f00';
+      ctx.font = '10px Consolas, monospace';
+      ctx.fillText(`${f.dist.toFixed(0)}cm`, cx + 15, cy + 20);
+    }
+  }
+
+  // Velocity arrow (red)
+  if ($('chk-velocity').checked && f.evx != null && f.evy != null) {
+    const speed = Math.hypot(f.evx, f.evy);
+    if (speed > 1) {
+      const [vex, vey] = w2c(f.ex + f.evx * 0.5, f.ey + f.evy * 0.5);
+      drawArrowLine(cx, cy, vex, vey, '#f00', 2);
+    }
+  }
+
+  // Heading arrow — color-coded by method
+  // velocity: BGR(0,255,0) = green, shape: BGR(255,255,0) = cyan, hold: gray
+  if ($('chk-heading').checked && f.eh != null) {
+    const hm = f.ehm || 'none';
+    const hColor = hm === 'velocity' ? '#0f0' : hm === 'shape' ? '#0ff' : '#999';
+    const arrowCm = 8;
+    const [hx, hy] = w2c(f.ex + Math.cos(f.eh) * arrowCm, f.ey + Math.sin(f.eh) * arrowCm);
+    drawArrowLine(cx, cy, hx, hy, hColor, 2);
+    const hdeg = (f.eh * 180 / Math.PI).toFixed(0);
+    ctx.fillStyle = hColor;
+    ctx.font = '9px Consolas, monospace';
+    ctx.fillText(`H:${hm.substring(0,3)} ${hdeg}\u00B0`, cx + 25, cy + 15);
+  }
 }
 
 function findFrameAtTime(t) {
@@ -1230,6 +1252,16 @@ resizeCanvas();
           const blob = await r.blob();
           fileObjects.push(new File([blob], f.name));
         } catch(e) { /* optional file missing is fine */ }
+      }
+      // Fallback: if no log-specific arena PNG, try arena_snapshot.png
+      if (!fileObjects.some(f => f.name.endsWith('.png'))) {
+        try {
+          const r = await fetch('/arena_snapshot.png');
+          if (r.ok) {
+            const blob = await r.blob();
+            fileObjects.push(new File([blob], 'arena_snapshot.png', {type: 'image/png'}));
+          }
+        } catch(e) {}
       }
       if (fileObjects.length > 0) {
         loadFiles(fileObjects);

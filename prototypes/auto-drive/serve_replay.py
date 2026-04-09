@@ -37,6 +37,8 @@ def find_latest_replay():
         result["arena_json"] = f"logs/{arena_json}"
     if os.path.exists(os.path.join(LOGS, arena_png)):
         result["arena_png"] = f"logs/{arena_png}"
+    elif os.path.exists(os.path.join(BASE, "arena_snapshot.png")):
+        result["arena_png"] = "arena_snapshot.png"
 
     return result
 

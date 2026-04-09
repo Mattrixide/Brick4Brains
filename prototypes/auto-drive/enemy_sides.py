@@ -105,10 +105,33 @@ def needs_flanking(
     enemy_pos: tuple[float, float],
     enemy_heading_rad: float,
     safe_side: str,
+    distance_cm: float = 999.0,
+    enemy_heading_confidence: float = 0.0,
 ) -> bool:
-    """Check if we need to arc around to the safe side.
+    """Check if we should arc around to the safe side.
 
-    Returns True if we are NOT on the safe side (need to flank).
+    Only returns True when flanking is highly confident:
+    - Far enough away to maneuver (>80cm)
+    - Enemy heading is reliable (confidence > 0.6)
+    - We're approaching a clearly dangerous side (>60 degrees off safe side)
+
+    At close range or with uncertain heading, always pursue directly.
     """
-    current_side = classify_approach_side(our_pos, enemy_pos, enemy_heading_rad)
-    return current_side != safe_side
+    # Too close to flank — just charge
+    if distance_cm < 80.0:
+        return False
+
+    # Don't trust flank decisions with low heading confidence
+    if enemy_heading_confidence < 0.6:
+        return False
+
+    # How far off the safe approach angle are we?
+    dx = our_pos[0] - enemy_pos[0]
+    dy = our_pos[1] - enemy_pos[1]
+    approach_angle = math.atan2(dy, dx)
+    ideal_angle = enemy_heading_rad + _SIDE_OFFSETS.get(safe_side, 0.0)
+    off_angle = abs(angle_diff(approach_angle, ideal_angle))
+
+    # Only flank if clearly on the wrong side (>60 degrees off)
+    # Within 60 degrees, pursue directly — close enough to safe side
+    return off_angle > math.pi / 3

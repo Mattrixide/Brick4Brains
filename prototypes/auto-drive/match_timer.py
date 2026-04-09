@@ -4,11 +4,26 @@ import time
 
 
 class MatchTimer:
-    """Countdown timer for match duration with urgency scalar."""
+    """Countdown timer for match duration with urgency scalar and match phase."""
 
-    def __init__(self, duration_s: float = 180.0, urgency_ramp_s: float = 60.0):
+    def __init__(
+        self,
+        duration_s: float = 180.0,
+        urgency_ramp_s: float = 60.0,
+        phase_start_s: float = 30.0,
+        phase_final_s: float = 30.0,
+    ):
         self._duration = duration_s
         self._urgency_ramp = urgency_ramp_s
+        # Validate phase boundaries don't exceed match duration
+        total_phases = phase_start_s + phase_final_s
+        if total_phases >= duration_s:
+            # Scale proportionally to fit
+            scale = (duration_s * 0.8) / total_phases
+            phase_start_s *= scale
+            phase_final_s *= scale
+        self._phase_start_s = phase_start_s
+        self._phase_final_s = phase_final_s
         self._start: float | None = None
 
     def start(self) -> None:
@@ -45,6 +60,18 @@ class MatchTimer:
         if remaining <= 0.0:
             return 1.0
         return 1.0 - (remaining / self._urgency_ramp)
+
+    @property
+    def phase(self) -> str:
+        """Match phase: 'start', 'mid', 'final', or 'post'."""
+        if self.is_expired:
+            return "post"
+        elapsed = self.elapsed_s
+        if elapsed < self._phase_start_s:
+            return "start"
+        if elapsed >= self._duration - self._phase_final_s:
+            return "final"
+        return "mid"
 
     @property
     def duration_s(self) -> float:

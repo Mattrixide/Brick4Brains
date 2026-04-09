@@ -8,6 +8,7 @@ log = logging.getLogger(__name__)
 
 VALID_SIDES = ("front", "back", "left", "right")
 VALID_STRATEGIES = ("charge", "pit", "evade")
+VALID_OPENINGS = ("fast_pin", "center", "avoid", "charge", "pit")
 
 
 @dataclass
@@ -40,6 +41,22 @@ class BattleConfig:
     acquire_frames: int = 20
     lost_timeout_frames: int = 45
 
+    # Opening strategy
+    opening_strategy: str = "charge"
+
+    # Match phases
+    phase_start_s: float = 30.0
+    phase_final_s: float = 30.0
+    mid_aggression: float = 0.8
+    final_aggression: float = 1.0
+
+    # Push commit window
+    push_commit_s: float = 1.0
+    stall_speed_threshold: float = 8.0  # cm/s (accounts for vision noise)
+
+    # Victory dance
+    victory_dance_duration_s: float = 3.0
+
     def __post_init__(self):
         self.pin_duration_s = max(1.0, min(10.0, self.pin_duration_s))
         if self.safe_side not in VALID_SIDES:
@@ -48,6 +65,12 @@ class BattleConfig:
         if self.strategy not in VALID_STRATEGIES:
             log.warning("Invalid strategy %r, defaulting to 'charge'", self.strategy)
             self.strategy = "charge"
+        if self.opening_strategy not in VALID_OPENINGS:
+            log.warning("Invalid opening_strategy %r, defaulting to 'charge'", self.opening_strategy)
+            self.opening_strategy = "charge"
+        self.push_commit_s = max(0.1, min(3.0, self.push_commit_s))
+        self.stall_speed_threshold = max(1.0, min(20.0, self.stall_speed_threshold))
+        self.victory_dance_duration_s = max(1.0, min(10.0, self.victory_dance_duration_s))
 
     def save(self, path: str = "battle_config.json") -> None:
         with open(path, "w") as f:

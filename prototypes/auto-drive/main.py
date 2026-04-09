@@ -109,7 +109,7 @@ class AutoDriveApp:
         self.mode = MODE_IDLE
         self.running = True
         self._system_mode = SYSTEM_CONFIG
-        self._flourish_timer = None  # for victory dance
+        # (flourish replaced by HSM victory_dance)  # for victory dance
 
         # Voice system
         if _HAS_VOICE:
@@ -354,7 +354,7 @@ class AutoDriveApp:
         self._system_mode = SYSTEM_CONFIG
         self._match_timer.reset()
         self._battle_controller.reset()
-        self._flourish_timer = None
+        # (flourish replaced by HSM victory_dance)
         self._rate_mode_active = False  # allow direct mode commands again
         self._say("Emergency stop")
         print("[EMERGENCY STOP] All systems halted")
@@ -377,11 +377,18 @@ class AutoDriveApp:
         self._match_timer.reset()
         self._match_timer.start()
         self._pin_timer.reset()
-        self._flourish_timer = None
         # Don't reset enemy tracker — preserve tracking from ready mode
         self.mode = MODE_BATTLE
         self._battle_start_t = time.perf_counter()
-        print("[battle] FIGHT! Match started!")
+
+        # Build a minimal context for start_match routing
+        from state_machine import BattleContext
+        ctx = BattleContext(
+            enemy_detected=self._enemy_tracker.enemy_detected,
+            enemy_tracking=self._enemy_tracker.is_tracking,
+        )
+        self._battle_controller.start_match(ctx)
+        print(f"[battle] FIGHT! Opening: {self._battle_controller.cfg.opening_strategy}")
         self._say("Fight!")
 
     def start(self):
@@ -1138,18 +1145,15 @@ class AutoDriveApp:
             elif self.mode == MODE_BATTLE:
                 # HSM combat state machine
 
-                # Postmatch flourish — victory spin then stop
-                if self._system_mode == SYSTEM_POSTMATCH and self._flourish_timer is not None:
-                    flourish_elapsed = now - self._flourish_timer
-                    if flourish_elapsed < 3.0:
-                        throttle = 0.0
-                        steering = 0.8
-                    else:
-                        self.mode = MODE_IDLE
-                        self._system_mode = SYSTEM_CONFIG
-                        self._flourish_timer = None
-                        self.comms.stop()
-                        print("[battle] Flourish complete — idle")
+                # Victory dance complete — transition to idle
+                if self._battle_controller.is_dance_finished:
+                    self.mode = MODE_IDLE
+                    self._system_mode = SYSTEM_CONFIG
+                    self.comms.stop()
+                    print("[battle] Victory dance complete — idle")
+                # Postmatch — HSM handles the victory dance spin
+                elif self._system_mode == SYSTEM_POSTMATCH:
+                    pass  # tick() below handles it
                 # Normal battle mode
                 else:
                     # Check for controller override (grace period after battle start
@@ -1171,10 +1175,9 @@ class AutoDriveApp:
                         steering = ctrl.steering
                         buttons = ctrl.buttons
                     elif self._match_timer.is_expired:
-                        print("[battle] Match timer expired — victory flourish!")
+                        print("[battle] Match timer expired — victory dance!")
                         self._system_mode = SYSTEM_POSTMATCH
-                        self._flourish_timer = time.perf_counter()
-                        self._battle_controller.reset()
+                        self._battle_controller.enter_victory_dance()
                     else:
                         # Build context from current sensor data
                         # Freeze our position when ArUco is lost (avoid (0,0) phantom)
@@ -1204,17 +1207,26 @@ class AutoDriveApp:
                             else:
                                 enemy_vel = (0.0, 0.0)
 
-                        # Get IMU accelerometer data
+                        # Get IMU data
                         accel_x, accel_y = 0.0, 0.0
+                        imu_heading = 0.0
+                        imu_pitch = 0.0
+                        imu_roll = 0.0
                         if self._telemetry.is_active:
                             tel = self._telemetry.get()
                             accel_x = tel.get("accel_x", 0.0)
                             accel_y = tel.get("accel_y", 0.0)
+                            imu_heading = tel.get("heading", 0.0)
+                            imu_pitch = tel.get("pitch", 0.0)
+                            imu_roll = tel.get("roll", 0.0)
+
+                        # Zero velocity when ArUco lost to prevent stale readings
+                        battle_velocity = self._our_velocity if detected else (0.0, 0.0)
 
                         ctx = BattleContext(
                             our_pos=battle_pos,
                             our_heading_rad=battle_heading,
-                            our_velocity=self._our_velocity,
+                            our_velocity=battle_velocity,
                             enemy_pos=enemy_pos,
                             enemy_heading_rad=enemy_heading,
                             enemy_velocity=enemy_vel,
@@ -1227,6 +1239,9 @@ class AutoDriveApp:
                             accel_x_mg=accel_x,
                             accel_y_mg=accel_y,
                             throttle_cmd=throttle,
+                            imu_pitch_deg=imu_pitch,
+                            imu_roll_deg=imu_roll,
+                            imu_heading_deg=imu_heading,
                         )
                         output = self._battle_controller.tick(ctx)
                         if output.target_omega_dps is not None:
@@ -1420,6 +1435,7 @@ class AutoDriveApp:
                     "t": round(now, 4),
                     "mode": self.mode,
                     "bs": self._battle_controller.state if self.mode == MODE_BATTLE else "ready",
+                    "mp": self._match_timer.phase if self.mode == MODE_BATTLE and self._match_timer.is_running else None,
                     "ox": round(x_cm, 1), "oy": round(y_cm, 1),
                     "oh": round(heading_rad, 3),
                     "od": detected,
@@ -1562,13 +1578,18 @@ class AutoDriveApp:
                             # Show HSM state instead of old PursuitFSM
                             bstate = self._battle_controller.state
                             state_colors = {
-                                "scan": (150, 150, 150), "acquire": (0, 200, 255),
+                                "wait": (80, 80, 80), "goto_center": (100, 136, 68),
+                                "acquire": (0, 200, 255),
                                 "charge_pursue": (0, 100, 255), "charge_flank": (0, 150, 255),
-                                "charge_ram": (0, 0, 255), "charge_pin": (0, 255, 255),
+                                "charge_reorient": (100, 50, 255),
+                                "pin": (0, 255, 255),
                                 "pit_position": (0, 200, 100), "pit_push": (0, 255, 0),
                                 "pit_commit": (0, 255, 50), "pit_abort": (0, 200, 200),
                                 "evade_retreat": (255, 0, 200), "evade_reposition": (200, 100, 255),
+                                "wall_reverse": (51, 102, 255),
                                 "unstick": (0, 165, 255), "lost_target": (100, 100, 100),
+                                "lost_aruco": (51, 99, 153),
+                                "victory_dance": (0, 215, 255),
                             }
                             sc = state_colors.get(bstate, (200, 200, 200))
                             cv2.putText(stream_frame, bstate.upper().replace("_", " "),
@@ -1590,7 +1611,7 @@ class AutoDriveApp:
                             cv2.putText(stream_frame, state_text, (10, 90),
                                         cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 200, 255), 1)
 
-                    # PIN countdown overlay (both old MODE_PIN and new battle charge_pin)
+                    # PIN countdown overlay (both old MODE_PIN and new battle pin state)
                     if self.mode == MODE_PIN and hasattr(self, '_pin_start_time'):
                         remaining = max(0, 5.0 - (time.perf_counter() - self._pin_start_time))
                         h_f, w_f = stream_frame.shape[:2]
@@ -1604,7 +1625,7 @@ class AutoDriveApp:
                                     cv2.FONT_HERSHEY_SIMPLEX, 4, (0, 255, 255), 8)
                         cv2.putText(stream_frame, "PINNING", (tx, ty - 80),
                                     cv2.FONT_HERSHEY_SIMPLEX, 1.5, (0, 255, 255), 3)
-                    elif self.mode == MODE_BATTLE and self._battle_controller.state == "charge_pin":
+                    elif self.mode == MODE_BATTLE and self._battle_controller.state == "pin":
                         remaining = max(0, self._pin_timer.remaining_s)
                         h_f, w_f = stream_frame.shape[:2]
                         countdown_text = f"{remaining:.1f}"
@@ -1886,22 +1907,14 @@ class AutoDriveApp:
                     print(f"[main] Click goto failed: {e}")
 
         elif cmd_type == "start_battle":
-            print("[main] Starting battle!")
-            self._system_mode = SYSTEM_BATTLE
-            self._battle_controller.reset()
-            self._match_timer.reset()
-            self._match_timer.start()
-            self._pin_timer.reset()
-            self._flourish_timer = None
-            self._enemy_tracker.reset()
-            self.mode = MODE_BATTLE
+            print("[main] Starting battle via dashboard!")
+            self._start_battle()
 
         elif cmd_type == "stop_battle":
             print("[main] Stopping battle")
             self._system_mode = SYSTEM_CONFIG
             self._match_timer.reset()
             self._battle_controller.reset()
-            self._flourish_timer = None
             self.mode = MODE_IDLE
             self.comms.stop()
 
@@ -2144,6 +2157,7 @@ class AutoDriveApp:
             if self.mode == MODE_BATTLE:
                 self.shared_state["battle_state"] = self._battle_controller.state
                 self.shared_state["match_remaining_s"] = round(self._match_timer.remaining_s, 1)
+                self.shared_state["match_phase"] = self._match_timer.phase
                 self.shared_state["pin_remaining_s"] = (
                     round(self._pin_timer.remaining_s, 1) if self._pin_timer.is_running else None
                 )
@@ -2151,6 +2165,7 @@ class AutoDriveApp:
             else:
                 self.shared_state["battle_state"] = None
                 self.shared_state["match_remaining_s"] = None
+                self.shared_state["match_phase"] = None
                 self.shared_state["pin_remaining_s"] = None
                 self.shared_state["urgency"] = None
 

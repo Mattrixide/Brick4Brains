@@ -22,20 +22,24 @@ HUD_BG = (20, 20, 35, 200)
 
 # State → color mapping for badge
 STATE_COLORS = {
-    "scan": (150, 150, 150),
+    "wait": (80, 80, 80),
+    "goto_center": (100, 136, 68),
     "acquire": (255, 200, 50),
     "charge_pursue": (255, 100, 50),
     "charge_flank": (255, 150, 50),
-    "charge_ram": (255, 50, 50),
-    "charge_pin": (0, 200, 200),
+    "charge_reorient": (200, 100, 50),
+    "pin": (0, 200, 200),
     "pit_position": (50, 200, 50),
     "pit_push": (50, 255, 50),
     "pit_commit": (0, 255, 0),
     "pit_abort": (200, 200, 50),
     "evade_retreat": (180, 50, 200),
     "evade_reposition": (150, 100, 200),
+    "wall_reverse": (255, 100, 50),
     "unstick": (255, 150, 0),
     "lost_target": (100, 100, 100),
+    "lost_aruco": (150, 100, 50),
+    "victory_dance": (255, 215, 0),
 }
 
 

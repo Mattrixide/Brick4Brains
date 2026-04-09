@@ -87,10 +87,10 @@ class SimResult:
 class PinDetector:
     """Detects pin events based on controller state + physics proximity.
 
-    Uses a hybrid approach: the controller entering charge_pin state means
+    Uses a hybrid approach: the controller entering pin state means
     it believes a pin is happening. The physics validates proximity and
     wall contact. A pin "scores" when the controller has accumulated
-    enough time in charge_pin state.
+    enough time in pin state.
     """
 
     def __init__(self, wall_threshold_cm: float = 80.0,
@@ -114,8 +114,8 @@ class PinDetector:
         dist = float(np.linalg.norm(our.pos - enemy.pos))
         close = dist < self.proximity
 
-        # Our robot pinning enemy (controller in charge_pin + physics confirms)
-        if controller_state == "charge_pin" and close and self._is_at_wall(enemy.pos):
+        # Our robot pinning enemy (controller in pin + physics confirms)
+        if controller_state == "pin" and close and self._is_at_wall(enemy.pos):
             self._our_cumulative_pin += dt
             if self._our_cumulative_pin >= self.pin_score_duration:
                 self.our_pin_count += 1

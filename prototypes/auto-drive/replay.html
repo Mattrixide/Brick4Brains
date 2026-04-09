@@ -262,6 +262,7 @@
       <div class="data-row"><span class="label">Time</span><span class="value" id="d-time">--</span></div>
       <div class="data-row"><span class="label">FPS</span><span class="value" id="d-fps">--</span></div>
       <div class="data-row"><span class="label">Mode</span><span class="value" id="d-mode">--</span></div>
+      <div class="data-row"><span class="label">Phase</span><span class="value" id="d-phase">--</span></div>
       <div class="data-row"><span class="label">Battle State</span><span class="value" id="d-battle-state">--</span></div>
       <div class="data-row"><span class="label">Match</span><span class="value" id="d-match">--</span></div>
       <div class="data-row"><span class="label">Urgency</span><span class="value" id="d-urgency">--</span></div>
@@ -305,30 +306,50 @@
 // State color palette
 // ======================================================================
 const STATE_COLORS = {
-  idle:             '#444444',
-  battle:           '#00ff64',
+  // Current states
+  wait:             '#555555',
+  goto_center:      '#446688',
   acquire:          '#00c8ff',
   charge_pursue:    '#0064ff',
   charge_flank:     '#0096ff',
-  charge_ram:       '#ff0000',
-  charge_pin:       '#00ffff',
+  charge_reorient:  '#6432ff',
+  pin:              '#00ffff',
   pit_position:     '#00c864',
   pit_push:         '#00ff00',
   pit_commit:       '#00ff32',
   pit_abort:        '#00c8c8',
   evade_retreat:    '#ff00c8',
   evade_reposition: '#c864ff',
+  wall_reverse:     '#ff6633',
   unstick:          '#ffa500',
   lost_target:      '#666666',
+  lost_aruco:       '#996633',
+  victory_dance:    '#ffd700',
+  // Backward compat aliases (old state names)
+  idle:             '#444444',
+  battle:           '#00ff64',
+  scan:             '#999999',
+  charge_ram:       '#0064ff',   // merged into charge_pursue
+  charge_pin:       '#00ffff',   // renamed to pin
+};
+
+const PHASE_COLORS = {
+  start: '#c89632',
+  mid:   '#2d8a6a',
+  final: '#c83232',
+  post:  '#ffd700',
 };
 
 function stateColor(s) { return STATE_COLORS[s] || '#888'; }
+function phaseColor(p) { return PHASE_COLORS[p] || '#444'; }
 
 // ======================================================================
 // Data
 // ======================================================================
 let frames = [];
 let stateEvents = []; // [{frame, time, state}]
+let phaseEvents = []; // [{frame, time, phase}]
+let hasPhaseData = false;
 let currentFrame = 0;
 let playing = false;
 let playSpeed = 1;
@@ -433,14 +454,25 @@ function loadFiles(fileList) {
     if (arenaMeta) info += '  |  pit mapped';
     $('file-info').textContent = info;
 
-    // Build state event list
+    // Build state + phase event lists
     stateEvents = [];
+    phaseEvents = [];
+    hasPhaseData = false;
     let lastState = null;
+    let lastPhase = null;
     for (let i = 0; i < frames.length; i++) {
       const s = frames[i].bs || frames[i].mode;
       if (s !== lastState) {
         stateEvents.push({ frame: i, time: frames[i].t, state: s });
         lastState = s;
+      }
+      const mp = frames[i].mp;
+      if (mp) {
+        hasPhaseData = true;
+        if (mp !== lastPhase) {
+          phaseEvents.push({ frame: i, time: frames[i].t, phase: mp });
+          lastPhase = mp;
+        }
       }
     }
     buildEventList();
@@ -877,14 +909,51 @@ function drawStateBar() {
   const totalT = frames[frames.length-1].t;
   if (totalT <= 0) return;
 
+  // Phase background tint (30% opacity) — only if data has mp field
+  if (hasPhaseData && phaseEvents.length > 0) {
+    stateBarCtx.globalAlpha = 0.3;
+    for (let i = 0; i < phaseEvents.length; i++) {
+      const ev = phaseEvents[i];
+      const nextT = (i + 1 < phaseEvents.length) ? phaseEvents[i+1].time : totalT;
+      const x1 = (ev.time / totalT) * w;
+      const x2 = (nextT / totalT) * w;
+      stateBarCtx.fillStyle = phaseColor(ev.phase);
+      stateBarCtx.fillRect(x1, 0, Math.max(1, x2 - x1), h);
+    }
+    // Phase divider lines + labels
+    stateBarCtx.globalAlpha = 0.8;
+    stateBarCtx.strokeStyle = '#fff';
+    stateBarCtx.lineWidth = 1;
+    stateBarCtx.font = '8px sans-serif';
+    stateBarCtx.fillStyle = '#fff';
+    for (let i = 1; i < phaseEvents.length; i++) {
+      const x = (phaseEvents[i].time / totalT) * w;
+      stateBarCtx.beginPath();
+      stateBarCtx.moveTo(x, 0);
+      stateBarCtx.lineTo(x, h);
+      stateBarCtx.stroke();
+      // Label
+      const label = phaseEvents[i].phase.toUpperCase();
+      stateBarCtx.fillText(label, x + 2, 8);
+    }
+    // First phase label
+    if (phaseEvents.length > 0) {
+      stateBarCtx.fillText(phaseEvents[0].phase.toUpperCase(), 2, 8);
+    }
+    stateBarCtx.globalAlpha = 1.0;
+  }
+
+  // State color segments on top
   for (let i = 0; i < stateEvents.length; i++) {
     const ev = stateEvents[i];
     const nextT = (i + 1 < stateEvents.length) ? stateEvents[i+1].time : totalT;
     const x1 = (ev.time / totalT) * w;
     const x2 = (nextT / totalT) * w;
     stateBarCtx.fillStyle = stateColor(ev.state);
-    stateBarCtx.fillRect(x1, 0, Math.max(1, x2 - x1), h);
+    stateBarCtx.globalAlpha = 0.85;
+    stateBarCtx.fillRect(x1, 4, Math.max(1, x2 - x1), h - 4);
   }
+  stateBarCtx.globalAlpha = 1.0;
 
   // Playhead
   const px = (frames[currentFrame].t / totalT) * w;
@@ -900,6 +969,13 @@ function updateDataPanel(f) {
   $('d-time').textContent = fmtTime(f.t);
   $('d-fps').textContent = f.fps != null ? f.fps : '--';
   $('d-mode').textContent = f.mode;
+
+  // Phase badge
+  const mp = f.mp;
+  const phaseEl = $('d-phase');
+  phaseEl.innerHTML = mp
+    ? `<span class="state-badge" style="background:${phaseColor(mp)}20;color:${phaseColor(mp)}">${mp.toUpperCase()}</span>`
+    : '--';
 
   const bs = f.bs || '--';
   const el = $('d-battle-state');
@@ -999,6 +1075,27 @@ function buildEventList() {
 // ======================================================================
 const SPEEDS = [0.1, 0.25, 0.5, 1, 2, 4, 8];
 let speedIdx = 3;
+
+// State bar hover tooltip
+stateBarCanvas.addEventListener('mousemove', (e) => {
+  if (!frames.length) return;
+  const rect = stateBarCanvas.getBoundingClientRect();
+  const x = e.clientX - rect.left;
+  const frac = x / rect.width;
+  const totalT = frames[frames.length-1].t;
+  const hoverT = frac * totalT;
+  // Find state at hover time
+  let hoverState = '--';
+  for (let i = stateEvents.length - 1; i >= 0; i--) {
+    if (stateEvents[i].time <= hoverT) { hoverState = stateEvents[i].state; break; }
+  }
+  let hoverPhase = '';
+  for (let i = phaseEvents.length - 1; i >= 0; i--) {
+    if (phaseEvents[i].time <= hoverT) { hoverPhase = phaseEvents[i].phase; break; }
+  }
+  const phaseStr = hoverPhase ? ` [${hoverPhase.toUpperCase()}]` : '';
+  stateBarCanvas.title = `${fmtTime(hoverT)} - ${hoverState}${phaseStr}`;
+});
 
 $('btn-play').addEventListener('click', togglePlay);
 $('btn-prev').addEventListener('click', () => { stopPlay(); renderFrame(Math.max(0, currentFrame - 1)); drawStateBar(); });

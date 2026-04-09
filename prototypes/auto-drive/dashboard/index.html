@@ -329,6 +329,10 @@
               <div class="metric-card__label">Current State</div>
             </div>
             <div class="metric-card">
+              <div class="metric-card__value" id="battle-phase-display">--</div>
+              <div class="metric-card__label">Match Phase</div>
+            </div>
+            <div class="metric-card">
               <div class="metric-card__value" id="battle-pin-timer">--</div>
               <div class="metric-card__label">Pin Timer</div>
             </div>
@@ -374,6 +378,24 @@
               <option value="pit">Pit (Herd to Pit)</option>
               <option value="evade">Evade (Defense)</option>
             </select>
+          </div>
+
+          <!-- Opening Strategy -->
+          <div class="config-bar mb-4">
+            <label for="battle-opening">Opening Move:</label>
+            <select id="battle-opening" style="padding:8px 12px;border:1px solid var(--color-border);border-radius:4px;font-family:var(--font-mono);min-width:160px">
+              <option value="charge">Charge (Standard)</option>
+              <option value="fast_pin">Fast Pin (Full Speed Ram)</option>
+              <option value="center">Center (Position First)</option>
+              <option value="avoid">Avoid (Evade + Counter)</option>
+              <option value="pit">Pit (Herd from Start)</option>
+            </select>
+          </div>
+
+          <!-- Push Commit Duration -->
+          <div class="config-bar mb-4">
+            <label for="battle-push-commit">Push Commit (s):</label>
+            <input type="number" id="battle-push-commit" value="1.0" min="0.1" max="3.0" step="0.1">
           </div>
 
           <!-- Safe Side -->

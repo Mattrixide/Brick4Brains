@@ -113,6 +113,7 @@ class DashboardServer:
                     'calib_points': self._state.get('calib_points', 0),
                     'system_mode': self._state.get('system_mode', 'config'),
                     'battle_state': self._state.get('battle_state', None),
+                    'match_phase': self._state.get('match_phase', None),
                     'match_remaining_s': self._state.get('match_remaining_s', None),
                     'pin_remaining_s': self._state.get('pin_remaining_s', None),
                     'urgency': self._state.get('urgency', None),

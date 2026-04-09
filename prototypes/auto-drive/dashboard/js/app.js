@@ -772,15 +772,21 @@
     if (stateBadge) {
       stateBadge.textContent = bstate.toUpperCase().replace('_', ' ');
       var stateClass = 'badge badge--info';
-      if (bstate.indexOf('charge') >= 0 || bstate.indexOf('ram') >= 0) stateClass = 'badge badge--danger';
-      else if (bstate.indexOf('pin') >= 0) stateClass = 'badge badge--accent';
+      if (bstate.indexOf('charge') >= 0) stateClass = 'badge badge--danger';
+      else if (bstate === 'pin') stateClass = 'badge badge--accent';
       else if (bstate.indexOf('evade') >= 0 || bstate.indexOf('retreat') >= 0) stateClass = 'badge badge--warning';
-      else if (bstate.indexOf('scan') >= 0 || bstate === '--') stateClass = 'badge badge--idle';
+      else if (bstate === 'wait' || bstate === '--') stateClass = 'badge badge--idle';
       else if (bstate.indexOf('acquire') >= 0) stateClass = 'badge badge--info';
       else if (bstate.indexOf('pit') >= 0) stateClass = 'badge badge--online';
-      else if (bstate.indexOf('unstick') >= 0) stateClass = 'badge badge--warning';
+      else if (bstate.indexOf('unstick') >= 0 || bstate === 'wall_reverse') stateClass = 'badge badge--warning';
+      else if (bstate === 'victory_dance') stateClass = 'badge badge--accent';
+      else if (bstate === 'lost_aruco' || bstate === 'lost_target') stateClass = 'badge badge--idle';
       stateBadge.className = stateClass;
     }
+
+    // Match phase display
+    var phase = s.match_phase || '--';
+    setText('battle-phase-display', phase.toUpperCase());
 
     // Pin timer
     var pinRemaining = s.pin_remaining_s;
@@ -809,6 +815,10 @@
         if (pinInput) pinInput.value = cfg.pin_duration_s || 5;
         var stratSelect = document.getElementById('battle-strategy');
         if (stratSelect) stratSelect.value = cfg.strategy || 'charge';
+        var openingSelect = document.getElementById('battle-opening');
+        if (openingSelect) openingSelect.value = cfg.opening_strategy || 'charge';
+        var pushInput = document.getElementById('battle-push-commit');
+        if (pushInput) pushInput.value = cfg.push_commit_s || 1.0;
         // Safe side radios
         var side = cfg.safe_side || 'front';
         var radio = document.querySelector('input[name="battle-safe-side"][value="' + side + '"]');
@@ -829,6 +839,10 @@
     if (pinInput) cfg.pin_duration_s = parseFloat(pinInput.value);
     var stratSelect = document.getElementById('battle-strategy');
     if (stratSelect) cfg.strategy = stratSelect.value;
+    var openingSelect = document.getElementById('battle-opening');
+    if (openingSelect) cfg.opening_strategy = openingSelect.value;
+    var pushInput = document.getElementById('battle-push-commit');
+    if (pushInput) cfg.push_commit_s = parseFloat(pushInput.value);
     var sideRadio = document.querySelector('input[name="battle-safe-side"]:checked');
     if (sideRadio) cfg.safe_side = sideRadio.value;
 

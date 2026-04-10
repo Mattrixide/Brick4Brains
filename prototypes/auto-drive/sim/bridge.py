@@ -65,7 +65,7 @@ class SimBridge:
             self.battle_config.opening_strategy = strategy_override
 
         # Sim match duration
-        self.battle_config.match_duration_s = 30.0
+        self.battle_config.match_duration_s = 180.0
 
         self._build_controller()
 

@@ -204,8 +204,16 @@ class SimRenderer:
             label_surf = label_font.render("PINNING", True, (100, 255, 0))
             screen.blit(label_surf, (sw // 2 - label_surf.get_width() // 2, sh // 2 - 90))
 
+        # Victory dance
+        if state == "victory_dance":
+            big_font = pygame.font.SysFont("consolas", 48, bold=True)
+            shadow = big_font.render("VICTORY!", True, (0, 0, 0))
+            screen.blit(shadow, (sw // 2 - shadow.get_width() // 2 + 3, sh // 2 - 20 + 3))
+            vic_surf = big_font.render("VICTORY!", True, (255, 215, 0))  # gold
+            screen.blit(vic_surf, (sw // 2 - vic_surf.get_width() // 2, sh // 2 - 20))
+
         # Match over
-        if bridge.match_timer.is_expired:
+        elif bridge.match_timer.is_expired:
             big_font = pygame.font.SysFont("consolas", 48, bold=True)
             # Shadow
             shadow = big_font.render("BATTLE OVER!", True, (0, 0, 0))

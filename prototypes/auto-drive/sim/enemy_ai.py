@@ -79,6 +79,8 @@ class EnemyController:
         self.mode = "manual"
         self._ai_bridge = None
         self._ai_match_started = False
+        self._was_pinned = False  # track if we were just pinned
+        self._pin_escape_timer = 0  # frames of boost after pin release
         # Load arena corners for wall avoidance
         floor_cal = _load_json("floor_calibration.json")
         if floor_cal and "corners_ft" in floor_cal:
@@ -147,6 +149,35 @@ class EnemyController:
         bx, by = brick.position
         heading = enemy.heading_rad
         dist_to_brick = math.hypot(ex - bx, ey - by)
+        cur_speed = math.hypot(*enemy.velocity)
+
+        # === Pin detection + escape burst ===
+        # Detect: we're pinned when near wall + near Brick + nearly stopped
+        wall_dist, wall_away = _nearest_wall_info(ex, ey, self._corners)
+        being_pinned = wall_dist < 20 and dist_to_brick < 30 and cur_speed < 5
+
+        if being_pinned:
+            self._was_pinned = True
+        elif self._was_pinned and dist_to_brick > 25:
+            # Just released from pin! Start escape burst
+            self._was_pinned = False
+            self._pin_escape_timer = 90  # 1.5 seconds of boost at 60fps
+
+        # During escape burst: max speed away from wall, ignore waypoints
+        if self._pin_escape_timer > 0:
+            self._pin_escape_timer -= 1
+            # Drive hard away from wall toward arena center
+            corners = self._corners
+            xs = [c[0] for c in corners]
+            ys = [c[1] for c in corners]
+            center_x = (min(xs) + max(xs)) / 2
+            center_y = (min(ys) + max(ys)) / 2
+            escape_angle = math.atan2(center_y - ey, center_x - ex)
+            diff = _wrap_to_pi(escape_angle - heading)
+            steering = _clamp(diff * 3.0, -1, 1)
+            if abs(diff) > math.pi / 2:
+                return (-2.0, steering)  # reverse at 2x if facing wrong way
+            return (2.0, steering)  # 2x forward boost toward center
 
         # === Generate safe waypoints on first call ===
         if not hasattr(self, '_waypoints') or not self._waypoints:

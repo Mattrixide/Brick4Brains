@@ -94,7 +94,7 @@ def main():
             arena.step()
 
         # --- Render ---
-        renderer.draw(screen)
+        renderer.draw(screen, bridge=brick_bridge if brick_ai else None)
 
         # --- HUD ---
         # State label

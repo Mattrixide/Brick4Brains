@@ -49,7 +49,7 @@ class SimRenderer:
         py = sh / 2.0 - (y - cy) * cfg.scale_px_per_cm  # flip Y for screen coords
         return (int(px), int(py))
 
-    def draw(self, screen):
+    def draw(self, screen, bridge=None):
         """Draw the full arena scene."""
         screen.fill(BG_COLOR)
         self._draw_grid(screen)
@@ -58,6 +58,8 @@ class SimRenderer:
         self._draw_pit(screen)
         self._draw_robot(screen, self.arena.brick, BRICK_COLOR)
         self._draw_robot(screen, self.arena.enemy, ENEMY_COLOR)
+        if bridge:
+            self._draw_battle_overlay(screen, bridge)
 
     def _draw_grid(self, screen):
         """Draw 30cm grid lines."""
@@ -158,3 +160,46 @@ class SimRenderer:
         front_px = self.cm_to_px(front_mid[0], front_mid[1], screen)
 
         pygame.draw.line(screen, ARROW_COLOR, center_px, front_px, 2)
+
+    def _draw_battle_overlay(self, screen, bridge):
+        """Draw battle state, match timer, and pin countdown."""
+        sw, sh = screen.get_size()
+
+        # Battle state — top center
+        state = bridge.state
+        state_font = pygame.font.SysFont("consolas", 20, bold=True)
+        state_text = state.upper().replace("_", " ")
+        state_surf = state_font.render(state_text, True, (0, 255, 200))
+        screen.blit(state_surf, (sw // 2 - state_surf.get_width() // 2, 10))
+
+        # Match timer — top right
+        if bridge.match_timer.is_running:
+            rem = bridge.match_timer.remaining_s
+            mins = int(rem) // 60
+            secs = int(rem) % 60
+            urg = bridge.match_timer.urgency
+            urg_color = (255, 255, 0) if urg < 0.5 else (255, 165, 0) if urg < 0.8 else (255, 0, 0)
+            timer_font = pygame.font.SysFont("consolas", 28, bold=True)
+            timer_surf = timer_font.render(f"{mins}:{secs:02d}", True, urg_color)
+            screen.blit(timer_surf, (sw - timer_surf.get_width() - 10, 8))
+            # Phase
+            phase = bridge.match_timer.phase
+            phase_font = pygame.font.SysFont("consolas", 14)
+            phase_surf = phase_font.render(phase.upper(), True, urg_color)
+            screen.blit(phase_surf, (sw - phase_surf.get_width() - 10, 38))
+
+        # Pin countdown — large center
+        if state == "pin" and hasattr(bridge, '_pin_timer'):
+            pin_rem = max(0, bridge._pin_timer.remaining_s)
+            count_text = f"{pin_rem:.1f}"
+            # Shadow
+            big_font = pygame.font.SysFont("consolas", 72, bold=True)
+            shadow = big_font.render(count_text, True, (0, 0, 0))
+            screen.blit(shadow, (sw // 2 - shadow.get_width() // 2 + 3, sh // 2 - 40 + 3))
+            # Foreground
+            pin_surf = big_font.render(count_text, True, (100, 255, 0))
+            screen.blit(pin_surf, (sw // 2 - pin_surf.get_width() // 2, sh // 2 - 40))
+            # PINNING label
+            label_font = pygame.font.SysFont("consolas", 28, bold=True)
+            label_surf = label_font.render("PINNING", True, (100, 255, 0))
+            screen.blit(label_surf, (sw // 2 - label_surf.get_width() // 2, sh // 2 - 90))

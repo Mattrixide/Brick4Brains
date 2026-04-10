@@ -147,7 +147,9 @@ def main():
     brick_ai = False
     match_started = False
     logging_on = False
-    brick_bridge = SimBridge(arena.brick, cfg, strategy_override="charge")
+    strategies = ["charge", "pit"]
+    strategy_idx = 0
+    brick_bridge = SimBridge(arena.brick, cfg, strategy_override=strategies[strategy_idx])
     logger = SimLogger(arena, brick_bridge)
     font = pygame.font.SysFont("consolas", 14)
     font_large = pygame.font.SysFont("consolas", 18)
@@ -172,6 +174,13 @@ def main():
                     else:
                         logger.start()
                         logging_on = True
+                elif event.key == pygame.K_t:
+                    strategy_idx = (strategy_idx + 1) % len(strategies)
+                    brick_bridge = SimBridge(arena.brick, cfg,
+                                            strategy_override=strategies[strategy_idx])
+                    logger = SimLogger(arena, brick_bridge)
+                    match_started = False
+                    print(f"Strategy: {strategies[strategy_idx].upper()}")
                 elif event.key == pygame.K_r:
                     if logging_on:
                         logger.stop()
@@ -235,7 +244,7 @@ def main():
         screen.blit(label, (10, 10))
 
         if brick_ai:
-            ai_label = font.render(f"AI: {brick_bridge.state}", True, (0, 200, 255))
+            ai_label = font.render(f"AI: {brick_bridge.state}  [{strategies[strategy_idx].upper()}]", True, (0, 200, 255))
             screen.blit(ai_label, (10, 75))
 
         bv = arena.brick.velocity
@@ -256,7 +265,7 @@ def main():
             screen.blit(log_label, (win_size - 40, 10))
 
         hint = font.render(
-            "WASD=Brick  Arrows=Enemy  B=AI  L=Log  Space=Pause  R=Reset",
+            "WASD=Brick  Arrows=Enemy  B=AI  T=Strategy  L=Log  Space=Pause  R=Reset",
             True, (140, 140, 140))
         screen.blit(hint, (10, win_size - 25))
 

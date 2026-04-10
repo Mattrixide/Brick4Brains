@@ -87,13 +87,18 @@ class SimRobot:
             cos_a = math.cos(self.body.angle)
             sin_a = math.sin(self.body.angle)
             v_fwd = vx * cos_a + vy * sin_a
-            brake = -v_fwd * self.mass * 40.0
+            # Brake harder at high speed, lighter during slow maneuvers
+            brake_gain = 15.0 + min(abs(v_fwd), 100.0) * 0.25  # 15-40
+            brake = -v_fwd * self.mass * brake_gain
             self.body.apply_force_at_local_point((brake, 0), (0, 0))
 
         if abs(steering) > 0.01:
             self.body.torque += steering * cfg.max_torque
         else:
-            self.body.torque += -self.body.angular_velocity * self.mass * 50.0
+            # Angular brake — proportional to speed
+            omega = self.body.angular_velocity
+            ang_gain = 20.0 + min(abs(omega), 5.0) * 6.0  # 20-50
+            self.body.torque += -omega * self.mass * ang_gain
 
     def clear_drive_flag(self):
         """Call at start of each frame. If apply_drive isn't called this frame,
@@ -243,9 +248,9 @@ class SimArena:
         self.brick.shape.elasticity = self.cfg.robot_elasticity
         self.brick.shape.friction = self.cfg.robot_friction
 
-        # Enemy: upper-left, 12" off corner, facing lower-right
+        # Enemy: center of arena, facing right
         self.enemy = SimRobot(
-            self.space, -126, 110, -45,
+            self.space, -30, 15, 0,
             self.cfg.enemy_width_cm, self.cfg.enemy_depth_cm,
             self.cfg.enemy_mass_kg, name="enemy",
         )
@@ -324,4 +329,4 @@ class SimArena:
     def reset(self):
         """Reset both robots to starting positions."""
         self.brick.reset(50, -70, 135)
-        self.enemy.reset(-100, 90, -45)
+        self.enemy.reset(-30, 15, 0)

@@ -193,8 +193,19 @@ class AutoDriveApp:
             self._battle_config.urgency_ramp_start_s,
         )
         self._pin_timer = PinTimer(self._battle_config.pin_duration_s)
+        # Load arena corners for wall detection
+        _arena_corners = None
+        _floor_cal_path = os.path.join(
+            os.path.dirname(os.path.abspath(__file__)), "floor_calibration.json"
+        )
+        if os.path.exists(_floor_cal_path):
+            with open(_floor_cal_path) as _fcf:
+                _floor_data = json.load(_fcf)
+            if "corners_ft" in _floor_data:
+                _arena_corners = [tuple(c) for c in _floor_data["corners_ft"]]
         self._battle_controller = BattleController(
-            self._battle_config, self._match_timer, self._pin_timer
+            self._battle_config, self._match_timer, self._pin_timer,
+            arena_corners=_arena_corners,
         )
 
         # Click-to-point state

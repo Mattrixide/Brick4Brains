@@ -56,7 +56,13 @@ class SimBridge:
         if battle_config_path is None:
             battle_config_path = os.path.join(AUTO_DRIVE_DIR, "battle_config.json")
 
+        # Suppress validation warnings during load (sim overrides strategy anyway)
+        import logging as _logging
+        _bl = _logging.getLogger("battle_config")
+        _prev = _bl.level
+        _bl.setLevel(_logging.ERROR)
         self.battle_config = BattleConfig.load(battle_config_path)
+        _bl.setLevel(_prev)
         self._battle_config_path = battle_config_path
 
         # Override strategy without modifying the real config file
@@ -125,6 +131,13 @@ class SimBridge:
     def tick(self, dt: float, enemy: SimRobot) -> BattleOutput:
         """Run one frame of the BattleController and apply forces to the robot."""
         _advance_sim_clock(dt)
+
+        # Enemy eliminated (pitted) → victory dance
+        if not enemy.alive and self.controller.state != "victory_dance":
+            import time as _t
+            self.controller.machine.set_state("victory_dance")
+            self.controller._victory_start = _t.perf_counter()
+            self.controller._pin_count = max(1, self.controller._pin_count)  # ensure victory triggers
 
         # Our state
         ox, oy = self.robot.position

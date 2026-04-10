@@ -373,9 +373,18 @@ class BattleController:
                             # Pin!
                             self._enter_pin(now)
                             return self._action_pin(ctx, now)
-                    # No pin — wall reverse
-                    self._enter_wall_reverse(ctx, now)
-                    return self._action_wall_reverse(ctx, now)
+                    # No pin — reorient to try a different angle
+                    # (wall_reverse makes no sense if we're not at a wall)
+                    our_near_wall = _near_wall(ctx.our_pos[0], ctx.our_pos[1],
+                                               self.cfg.wall_threshold_cm, self._arena_corners)
+                    if our_near_wall:
+                        self._enter_wall_reverse(ctx, now)
+                        return self._action_wall_reverse(ctx, now)
+                    else:
+                        log.info("[battle] PUSH stall in open — reorienting")
+                        self.machine.set_state("charge_reorient")
+                        self._reorient_timer = now
+                        return self._action_charge_reorient(ctx, now)
 
             # ArUco lost recovery — dead-reckon reverse (cheap frame counter check)
             # Pin + charge_pursue excluded: ArUco loss during engagement is expected
@@ -660,7 +669,8 @@ class BattleController:
         self.pin_timer.start()
         self._pin_entry_time = now
         self._pin_count += 1
-        self._recovery_cycle_count = 0  # successful pin resets recovery counter
+        # Don't reset recovery counter here — short micro-pins (0.5s) along walls
+        # shouldn't count as "successful recovery" for the cycle breaker
         log.info("[battle] PIN — holding (#%d)", self._pin_count)
 
     # -- Action functions ---------------------------------------------------
@@ -1413,6 +1423,11 @@ class BattleController:
             if dist_to_center < 15:
                 # Close enough — start spinning early
                 return BattleOutput(target_omega_dps=360.0, target_speed=0.0)
+
+            # Wall-stuck escape: reverse if near arena edge
+            if _near_wall(ctx.our_pos[0], ctx.our_pos[1], 15.0, self._arena_corners):
+                return BattleOutput(target_omega_dps=0.0, target_speed=-0.5)
+
             desired = math.atan2(-ctx.our_pos[1], -ctx.our_pos[0])
             alpha = _angle_diff(desired, ctx.our_heading_rad)
             omega = -200.0 * alpha

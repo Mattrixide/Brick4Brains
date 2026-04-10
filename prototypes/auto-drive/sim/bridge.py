@@ -2,10 +2,38 @@
 
 import math
 import os
+import time
 
 from state_machine import BattleController, BattleContext, BattleOutput
 from battle_config import BattleConfig
 from match_timer import MatchTimer, PinTimer
+
+
+# --- Sim clock patch ---
+# BattleController and MatchTimer use time.perf_counter() internally.
+# In headless/fast sim, wall clock doesn't match sim time.
+# This patches time.perf_counter to return sim-accumulated time.
+_sim_time = 0.0
+_real_perf_counter = time.perf_counter
+
+
+def _sim_perf_counter():
+    return _sim_time
+
+
+def _enable_sim_clock():
+    global _sim_time
+    _sim_time = _real_perf_counter()
+    time.perf_counter = _sim_perf_counter
+
+
+def _advance_sim_clock(dt):
+    global _sim_time
+    _sim_time += dt
+
+
+def _disable_sim_clock():
+    time.perf_counter = _real_perf_counter
 
 from sim.arena import SimRobot
 from sim.config import SimConfig
@@ -56,6 +84,7 @@ class SimBridge:
 
     def start_match(self, enemy: SimRobot):
         """Start the match timer and transition controller out of 'wait'."""
+        _enable_sim_clock()
         self.match_timer.start()
         # Build a context so controller.start_match can decide opening strategy
         ox, oy = self.robot.position
@@ -82,6 +111,8 @@ class SimBridge:
 
     def tick(self, dt: float, enemy: SimRobot) -> BattleOutput:
         """Run one frame of the BattleController and apply forces to the robot."""
+        _advance_sim_clock(dt)
+
         # Our state
         ox, oy = self.robot.position
         our_heading = self.robot.heading_rad
@@ -153,15 +184,11 @@ class SimBridge:
             return output
 
         if output.target_omega_dps is not None:
-            # Rate mode: P-controller on angular velocity
-            current_omega_dps = math.degrees(self.robot.angular_velocity)
-            omega_error = output.target_omega_dps - current_omega_dps
-            torque = _clamp(
-                omega_error * self.cfg.max_torque * 0.005,
-                -self.cfg.max_torque,
-                self.cfg.max_torque,
-            )
-            self.robot.body.torque += torque
+            # Rate mode: store target for post-step application
+            # Negate: BattleController omega sign assumes CW=positive (inverted IMU)
+            # but pymunk uses standard math convention (CCW=positive)
+            self.robot._rate_mode_omega = -math.radians(output.target_omega_dps)
+            self.robot._rate_mode_speed = output.target_speed
 
             # Forward force from target_speed
             if abs(output.target_speed) > 0.01:

@@ -152,8 +152,19 @@ class SimRobot:
             forward_speed * sin_a + lateral_speed * cos_a,
         )
 
-        # Damp angular
-        self.body.angular_velocity *= cfg.angular_damping
+        # Damp angular — skip if rate mode is controlling omega
+        if hasattr(self, '_rate_mode_omega'):
+            # Rate mode: directly set omega + align velocity to heading
+            self.body.angular_velocity = self._rate_mode_omega
+            vx, vy = self.body.velocity
+            speed = math.sqrt(vx * vx + vy * vy)
+            if speed > 1.0:
+                cos_h = math.cos(self.body.angle)
+                sin_h = math.sin(self.body.angle)
+                self.body.velocity = (speed * cos_h, speed * sin_h)
+            del self._rate_mode_omega
+        else:
+            self.body.angular_velocity *= cfg.angular_damping
 
     def get_corners_world(self):
         """Return 4 corners in world cm coordinates."""
@@ -222,9 +233,9 @@ class SimArena:
             self._create_pit()
 
         # Create robots
-        # Brick: lower-right, facing upper-left
+        # Brick: lower-right area, facing upper-left (inset from walls)
         self.brick = SimRobot(
-            self.space, 69, -85, 135,
+            self.space, 50, -70, 135,
             self.cfg.brick_width_cm, self.cfg.brick_depth_cm,
             self.cfg.brick_mass_kg, name="brick",
         )
@@ -311,5 +322,5 @@ class SimArena:
 
     def reset(self):
         """Reset both robots to starting positions."""
-        self.brick.reset(69, -85, 135)
-        self.enemy.reset(-126, 110, -45)
+        self.brick.reset(50, -70, 135)
+        self.enemy.reset(-100, 90, -45)

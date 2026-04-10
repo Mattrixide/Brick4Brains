@@ -213,13 +213,23 @@ class BattleController:
         # Victory dance
         self._victory_start: float | None = None
         self._dance_finished = False
+        self._pin_count = 0
+
+        # Recovery cycle breaker
+        self._recovery_cycle_count = 0
 
         # Goto center
         self._goto_center_target: tuple[float, float] | None = None
 
-        # Lost ArUco oscillation
+        # Lost ArUco recovery
         self._lost_aruco_t: float = 0.0
         self._lost_aruco_phase: int = -1
+        self._lost_aruco_target_heading: float = 0.0
+
+        # Reorient cycle detection
+        self._reorient_count: int = 0
+        self._reorient_window_start: float = 0.0
+        self._reorient_heading_at_entry: float = 0.0
 
         # Wall stuck counter
         self._wall_stuck_frames: int = 0
@@ -259,6 +269,17 @@ class BattleController:
     def tick(self, ctx: BattleContext) -> BattleOutput:
         """Main entry point — call once per frame."""
         now = time.perf_counter()
+
+        # Victory dance: match expired and we fought (had pins)
+        current = self.state
+        if (self.match_timer.is_expired
+                and current != "victory_dance"
+                and current != "wait"
+                and self._pin_count > 0):
+            self.machine.set_state("victory_dance")
+            self._victory_start = now
+            log.info("[battle] VICTORY DANCE — match over with %d pins", self._pin_count)
+            return self._action_victory_dance(ctx, now)
 
         # Track ArUco visibility
         if ctx.our_detected:
@@ -364,6 +385,7 @@ class BattleController:
                         # Give up — enter lost_aruco
                         if current != "lost_aruco":
                             self.machine.set_state("lost_aruco")
+                            self._lost_aruco_t = 0.0  # reset so _action_lost_aruco starts fresh
                             log.info("[battle] LOST ARUCO — giving up, waiting for re-acquisition")
                         return self._action_lost_aruco(ctx, now)
                     else:
@@ -501,12 +523,25 @@ class BattleController:
         self._pin_entry_time = 0.0
         self._last_impact_time = 0.0
         self._log_t = 0.0
+        self._lost_aruco_t = 0.0
+        self._reorient_count = 0
+        self._reorient_window_start = 0.0
+        self._reorient_heading_at_entry = 0.0
         self.pin_timer.reset()
+
+    def _pit_distance(self, x, y):
+        """Distance from position to pit center."""
+        return math.hypot(x - self.cfg.pit_x_cm, y - self.cfg.pit_y_cm)
+
+    def _pit_away_angle(self, x, y):
+        """Angle pointing away from pit center."""
+        return math.atan2(y - self.cfg.pit_y_cm, x - self.cfg.pit_x_cm)
 
     # -- Smart re-engagement ------------------------------------------------
 
     def _reengage(self, ctx: BattleContext) -> None:
         """Route to the best state based on current tracking status."""
+        self._recovery_cycle_count = 0
         if ctx.enemy_tracking and ctx.enemy_pos is not None:
             if self.cfg.strategy == "pit":
                 self.machine.set_state("pit_position")
@@ -583,12 +618,20 @@ class BattleController:
     # -- State entry helpers ------------------------------------------------
 
     def _enter_unstick(self) -> None:
+        self._recovery_cycle_count += 1
+        if self._recovery_cycle_count >= 3:
+            # Break the wall_reverse/unstick loop — retreat to open space
+            log.info("[battle] RECOVERY LOOP BREAK — forcing retreat after %d cycles",
+                     self._recovery_cycle_count)
+            self._recovery_cycle_count = 0
+            self._enter_retreat(reason="recovery_loop")
+            return
         self.machine.set_state("unstick")
         self._unstick_timer = time.perf_counter()
         self._unstick_phase = 1
         self._unstick_toggle_t = time.perf_counter()
         self._last_positions.clear()
-        log.info("[battle] UNSTICK — oscillating to free")
+        log.info("[battle] UNSTICK — oscillating to free (cycle %d)", self._recovery_cycle_count)
 
     def _enter_retreat(self, reason: str = "aruco_lost") -> None:
         self.machine.set_state("evade_retreat")
@@ -605,17 +648,20 @@ class BattleController:
         log.info("[battle] LOST TARGET — driving to last known position")
 
     def _enter_wall_reverse(self, ctx: BattleContext, now: float) -> None:
+        self._recovery_cycle_count += 1
         self.machine.set_state("wall_reverse")
         self._wall_reverse_timer = now
         self._wall_reverse_start_pos = (ctx.our_pos[0], ctx.our_pos[1]) if ctx.our_detected else None
         self._push_commit_timer = None
-        log.info("[battle] WALL REVERSE — backing up")
+        log.info("[battle] WALL REVERSE — backing up (cycle %d)", self._recovery_cycle_count)
 
     def _enter_pin(self, now: float) -> None:
         self.machine.set_state("pin")
         self.pin_timer.start()
         self._pin_entry_time = now
-        log.info("[battle] PIN — holding")
+        self._pin_count += 1
+        self._recovery_cycle_count = 0  # successful pin resets recovery counter
+        log.info("[battle] PIN — holding (#%d)", self._pin_count)
 
     # -- Action functions ---------------------------------------------------
 
@@ -741,9 +787,22 @@ class BattleController:
 
         # Reorient if facing away from enemy
         if alpha_abs > math.radians(110):
+            # Track reorient cycles — if too many in a short window, give up
+            if now - self._reorient_window_start > 8.0:
+                self._reorient_count = 0
+                self._reorient_window_start = now
+            self._reorient_count += 1
+            if self._reorient_count >= 3:
+                log.info("[pursue] REORIENT cycling %d times in 8s — dropping to lost_target",
+                         self._reorient_count)
+                self._reorient_count = 0
+                self._enter_lost_target(now)
+                return self._action_lost_target(ctx, now)
+
             log.info("[pursue] REORIENT triggered: alpha=%.0f°", math.degrees(alpha))
             self.machine.set_state("charge_reorient")
             self._reorient_timer = now
+            self._reorient_heading_at_entry = ctx.our_heading_rad
             return self._action_charge_reorient(ctx, now)
 
         # Throttle scaling: faster at close range, PN guidance at all distances
@@ -773,6 +832,7 @@ class BattleController:
         """Back up briefly, spin to face enemy, then resume pursuit."""
         if self._reorient_timer is None:
             self._reorient_timer = now
+            self._reorient_heading_at_entry = ctx.our_heading_rad
 
         elapsed = now - self._reorient_timer
 
@@ -786,6 +846,23 @@ class BattleController:
         if elapsed < 0.25:
             return BattleOutput(target_omega_dps=0.0, target_speed=-0.35)
 
+        # Hard timeout — applies regardless of enemy_pos
+        if elapsed > 1.5:
+            self._reorient_timer = None
+            self.machine.set_state("charge_pursue")
+            return self._action_charge_pursue(ctx, now)
+
+        # Stall detection: commanding spin but heading hasn't changed
+        # If heading moved less than 15° after 0.75s of spinning, we're stuck
+        if elapsed > 0.75:
+            heading_delta = abs(_angle_diff(ctx.our_heading_rad, self._reorient_heading_at_entry))
+            if heading_delta < math.radians(15):
+                log.info("[reorient] STALLED — heading moved only %.0f° in %.1fs, entering unstick",
+                         math.degrees(heading_delta), elapsed)
+                self._reorient_timer = None
+                self._enter_unstick()
+                return self._action_unstick(ctx, now)
+
         # Phase 2: Spin to face enemy
         if ctx.enemy_pos is not None:
             desired = math.atan2(
@@ -796,17 +873,12 @@ class BattleController:
 
             if abs(alpha) < math.radians(40):
                 self._reorient_timer = None
+                self._reorient_count = 0  # successful reorient — reset cycle counter
                 self.machine.set_state("charge_pursue")
                 return self._action_charge_pursue(ctx, now)
 
             omega = -300.0 if alpha > 0 else 300.0
             return BattleOutput(target_omega_dps=omega, target_speed=0.25)
-
-        # Timeout after 1.5s total
-        if elapsed > 1.5:
-            self._reorient_timer = None
-            self.machine.set_state("charge_pursue")
-            return self._action_charge_pursue(ctx, now)
 
         return BattleOutput(target_omega_dps=300.0, target_speed=0.25)
 
@@ -916,7 +988,7 @@ class BattleController:
         self_dist_to_pit = math.hypot(
             ctx.our_pos[0] - pit[0], ctx.our_pos[1] - pit[1]
         )
-        if self_dist_to_pit < self.cfg.pit_danger_radius_cm:
+        if self_dist_to_pit < self.cfg.pit_danger_radius_cm + 25.0:
             self.machine.set_state("pit_abort")
             self._pit_abort_timer = now
             log.info("[battle] PIT ABORT — too close to pit (%.0fcm)", self_dist_to_pit)
@@ -952,19 +1024,29 @@ class BattleController:
             log.info("[battle] PIT PUSH — in herding position")
             return self._action_pit_push(ctx, now)
 
-        if abs(alpha) > 1.0:
-            return BattleOutput(
-                throttle=0.0,
-                steering=0.6 if alpha > 0 else -0.6,
-            )
+        # Rate mode: omega from heading error, speed from distance
+        Kp_omega = 200.0
+        omega = -Kp_omega * alpha
+        omega = max(-300.0, min(300.0, omega))
 
-        throttle = min(0.8, 0.4 + dist_to_herd / 100.0)
-        steering = max(-0.6, min(0.6, alpha * 0.6))
-        return BattleOutput(throttle=throttle, steering=steering)
+        if abs(alpha) > 1.0:
+            # Large heading error — spin in place
+            speed = 0.0
+        else:
+            speed = min(0.8, 0.4 + dist_to_herd / 100.0)
+            speed *= math.cos(alpha) ** 2  # slow for turns
+            # Slow down near pit to avoid overshooting into it
+            if self_dist_to_pit < self.cfg.pit_danger_radius_cm * 2.5:
+                speed = min(speed, 0.4)
+
+        return BattleOutput(target_omega_dps=omega, target_speed=speed)
 
     def _action_pit_push(self, ctx: BattleContext, now: float) -> BattleOutput:
         """Push enemy toward pit."""
+        if not hasattr(self, '_pit_push_entry'):
+            self._pit_push_entry = now
         if ctx.enemy_pos is None:
+            self._pit_push_entry = None
             self.machine.set_state("pit_position")
             return BattleOutput()
 
@@ -973,7 +1055,10 @@ class BattleController:
         self_dist = math.hypot(
             ctx.our_pos[0] - pit[0], ctx.our_pos[1] - pit[1]
         )
-        if self_dist < self.cfg.pit_danger_radius_cm:
+        # Abort well before pit edge — robot body extends ~11cm past center,
+        # plus need stopping distance at current speed
+        abort_dist = self.cfg.pit_danger_radius_cm + 25.0
+        if self_dist < abort_dist:
             self.machine.set_state("pit_abort")
             self._pit_abort_timer = now
             return self._action_pit_abort(ctx, now)
@@ -986,17 +1071,36 @@ class BattleController:
             log.info("[battle] PIT COMMIT — enemy near pit (%.0fcm)", enemy_dist)
             return self._action_pit_commit(ctx, now)
 
+        # Push toward enemy, not directly toward pit — this keeps Brick
+        # on a path that goes through the enemy instead of around it
+        if ctx.enemy_detected and ctx.enemy_pos is not None:
+            target_x, target_y = ctx.enemy_pos
+        else:
+            target_x, target_y = pit
+
         desired_heading = math.atan2(
-            pit[1] - ctx.our_pos[1], pit[0] - ctx.our_pos[0]
+            target_y - ctx.our_pos[1], target_x - ctx.our_pos[0]
         )
         alpha = _angle_diff(desired_heading, ctx.our_heading_rad)
-        steering = max(-0.5, min(0.5, alpha * 0.6))
 
-        throttle = 1.0
-        if self_dist < self.cfg.pit_danger_radius_cm * 1.2:
-            throttle = 0.5
+        Kp_omega = 200.0
+        omega = -Kp_omega * alpha
+        omega = max(-300.0, min(300.0, omega))
 
-        return BattleOutput(throttle=throttle, steering=steering)
+        # Brief brake phase on entry (0.15s) to kill approach momentum
+        push_elapsed = now - self._pit_push_entry
+        if push_elapsed < 0.15:
+            return BattleOutput(target_omega_dps=omega, target_speed=0.0)
+
+        # Speed: slow and controlled, scaled by distance to pit
+        danger = self.cfg.pit_danger_radius_cm
+        if self_dist < danger * 2.0:
+            speed = 0.2   # crawl when close to pit
+        else:
+            speed = 0.5   # moderate push
+        speed *= math.cos(alpha) ** 2
+
+        return BattleOutput(target_omega_dps=omega, target_speed=speed)
 
     def _action_pit_commit(self, ctx: BattleContext, now: float) -> BattleOutput:
         """Max power push at pit edge."""
@@ -1004,13 +1108,19 @@ class BattleController:
         self_dist = math.hypot(
             ctx.our_pos[0] - pit[0], ctx.our_pos[1] - pit[1]
         )
-        if self_dist < self.cfg.pit_radius_cm + 5:
+        if self_dist < self.cfg.pit_radius_cm + 20:
             self.machine.set_state("pit_abort")
             self._pit_abort_timer = now
             log.info("[battle] PIT ABORT — self too close during commit")
             return self._action_pit_abort(ctx, now)
 
-        return BattleOutput(throttle=1.0, steering=0.0)
+        # Rate mode: full speed, hold heading toward pit
+        pit = (self.cfg.pit_x_cm, self.cfg.pit_y_cm)
+        desired = math.atan2(pit[1] - ctx.our_pos[1], pit[0] - ctx.our_pos[0])
+        alpha = _angle_diff(desired, ctx.our_heading_rad)
+        omega = -200.0 * alpha
+        omega = max(-300.0, min(300.0, omega))
+        return BattleOutput(target_omega_dps=omega, target_speed=1.0)
 
     def _action_pit_abort(self, ctx: BattleContext, now: float) -> BattleOutput:
         """Retreat away from pit."""
@@ -1029,11 +1139,16 @@ class BattleController:
         )
         alpha = _angle_diff(away_angle, ctx.our_heading_rad)
 
+        # Rate mode: drive away from pit
+        Kp_omega = 150.0
+        omega = -Kp_omega * alpha
+        omega = max(-200.0, min(200.0, omega))
+
         if abs(alpha) > math.pi / 2:
-            return BattleOutput(throttle=-0.6, steering=0.0)
+            # Facing pit — reverse
+            return BattleOutput(target_omega_dps=omega, target_speed=-0.5)
         else:
-            steering = max(-0.4, min(0.4, alpha * 0.4))
-            return BattleOutput(throttle=0.5, steering=steering)
+            return BattleOutput(target_omega_dps=omega, target_speed=0.5)
 
     # -- Evade actions ------------------------------------------------------
 
@@ -1053,6 +1168,7 @@ class BattleController:
             # If retreat was due to ArUco loss and still blind, don't drive blind
             if self._last_retreat_reason == "aruco_lost" and not ctx.our_detected:
                 self.machine.set_state("lost_aruco")
+                self._lost_aruco_t = 0.0  # reset so _action_lost_aruco starts fresh
                 log.info("[battle] RETREAT ended blind — waiting for ArUco")
                 return BattleOutput()
             elif self.cfg.strategy == "evade":
@@ -1120,9 +1236,16 @@ class BattleController:
         if elapsed < 0.1:
             return BattleOutput()
 
-        # Phase 2: Reverse
+        # Phase 2: Reverse (with pit avoidance)
         if elapsed < 0.5:
-            return BattleOutput(throttle=-0.6, steering=0.0)
+            steering = 0.0
+            # If reversing toward pit, steer away
+            pit_dist = self._pit_distance(ctx.our_pos[0], ctx.our_pos[1])
+            if pit_dist < self.cfg.pit_danger_radius_cm + 25:
+                away = self._pit_away_angle(ctx.our_pos[0], ctx.our_pos[1])
+                alpha = _angle_diff(away, ctx.our_heading_rad)
+                steering = max(-0.6, min(0.6, alpha * 0.5))
+            return BattleOutput(throttle=-0.6, steering=steering)
 
         # Phase 3: Done — check if we actually moved
         self._wall_reverse_timer = None
@@ -1182,7 +1305,15 @@ class BattleController:
             self._unstick_phase *= -1
             self._unstick_toggle_t = now
 
-        return BattleOutput(throttle=0.5 * self._unstick_phase, steering=0.0)
+        # Pit avoidance: bias oscillation away from pit
+        steering = 0.0
+        pit_dist = self._pit_distance(ctx.our_pos[0], ctx.our_pos[1])
+        if pit_dist < self.cfg.pit_danger_radius_cm + 25:
+            away = self._pit_away_angle(ctx.our_pos[0], ctx.our_pos[1])
+            alpha = _angle_diff(away, ctx.our_heading_rad)
+            steering = max(-0.5, min(0.5, alpha * 0.4))
+
+        return BattleOutput(throttle=0.5 * self._unstick_phase, steering=steering)
 
     # -- Lost target action -------------------------------------------------
 
@@ -1226,20 +1357,46 @@ class BattleController:
     # -- Lost ArUco action --------------------------------------------------
 
     def _action_lost_aruco(self, ctx: BattleContext, now: float) -> BattleOutput:
-        """Own position lost — reverse straight back until ArUco is visible.
+        """Own position lost — drive toward arena center to get back into
+        camera view.
 
-        Most common cause: marker pressed against wall during pin.
-        Driving forward would push back into the wall and hide the marker more.
-        Reverse pulls away from the wall to re-expose it.
+        Uses last known position to compute heading toward (0, 0) and drives
+        forward at 0.5 power for up to 2 seconds.  If that doesn't recover
+        the marker, spin slowly to search.
         """
         # ArUco re-acquired → snap back to normal
         if ctx.our_detected:
             log.info("[battle] LOST ARUCO — re-acquired, re-engaging")
+            self._lost_aruco_t = 0.0
             self._reengage(ctx)
             return BattleOutput()
 
-        # Reverse straight back at half speed using gyro heading hold
-        return BattleOutput(target_omega_dps=0.0, target_speed=-0.5)
+        # First frame — compute heading toward arena center from last known pos
+        if self._lost_aruco_t == 0.0:
+            self._lost_aruco_t = now
+            dx = 0.0 - self._last_aruco_x
+            dy = 0.0 - self._last_aruco_y
+            self._lost_aruco_target_heading = math.atan2(dy, dx)
+            log.info("[battle] LOST ARUCO — driving toward center from (%.0f, %.0f), heading %.0f°",
+                     self._last_aruco_x, self._last_aruco_y,
+                     math.degrees(self._lost_aruco_target_heading))
+
+        elapsed = now - self._lost_aruco_t
+
+        # Phase 1 (0-2s): drive toward arena center at 0.5 power
+        if elapsed < 2.0:
+            imu_heading_rad = math.radians(ctx.imu_heading_deg)
+            alpha = _angle_diff(self._lost_aruco_target_heading, imu_heading_rad)
+            omega = -150.0 * alpha
+            omega = max(-200.0, min(200.0, omega))
+            return BattleOutput(target_omega_dps=omega, target_speed=0.5)
+
+        # Phase 2 (2-4s): slow spin to search for marker
+        if elapsed < 4.0:
+            return BattleOutput(target_omega_dps=120.0, target_speed=0.0)
+
+        # Phase 3 (4s+): stop
+        return BattleOutput(target_omega_dps=0.0, target_speed=0.0)
 
     # -- Victory dance action -----------------------------------------------
 

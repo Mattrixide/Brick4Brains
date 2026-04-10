@@ -1486,10 +1486,14 @@ class AutoDriveApp:
                 urg = self._match_timer.urgency if hasattr(self, '_match_timer') and self._match_timer.is_running else None
                 # Accel
                 tel_ax, tel_ay = 0.0, 0.0
+                imu_fails, imu_dt_skips, imu_fails_total = 0, 0, 0
                 if self._telemetry.is_active:
                     tel_data = self._telemetry.get()
                     tel_ax = tel_data.get("accel_x", 0.0)
                     tel_ay = tel_data.get("accel_y", 0.0)
+                    imu_fails = tel_data.get("imu_check_fails", 0)
+                    imu_dt_skips = tel_data.get("imu_dt_skips", 0)
+                    imu_fails_total = tel_data.get("imu_fails_total", 0)
 
                 rec = {
                     "f": self._frame_count,
@@ -1513,14 +1517,16 @@ class AutoDriveApp:
                     "mr": round(mr, 1) if mr is not None else None,
                     "urg": round(urg, 3) if urg is not None else None,
                     "ax": round(tel_ax, 0), "ay": round(tel_ay, 0),
+                    "imu_fails": imu_fails, "imu_dt_skips": imu_dt_skips, "imu_fails_total": imu_fails_total,
                     "rm": 1 if getattr(self, '_rate_mode_active', False) else 0,
                     # Robot footprint polygon in cm (for replay visualization)
                     "fp": self._get_footprint_cm(),
                     # ArUco marker box corners in cm
                     "ab": [[round(c[0], 1), round(c[1], 1)] for c in self._aruco_corners_cm] if hasattr(self, '_aruco_corners_cm') and self._aruco_corners_cm is not None else None,
                     # Enemy raw detection position in cm (for yellow targeting box)
-                    "edx": round(float(self._enemy_tracker._last_detection_cm[0]), 1) if self._enemy_tracker._last_detection_cm is not None else None,
-                    "edy": round(float(self._enemy_tracker._last_detection_cm[1]), 1) if self._enemy_tracker._last_detection_cm is not None else None,
+                    # Note: _last_detection_cm is actually in METERS (Kalman internal units)
+                    "edx": round(float(self._enemy_tracker._last_detection_cm[0]) * 100.0, 1) if self._enemy_tracker._last_detection_cm is not None else None,
+                    "edy": round(float(self._enemy_tracker._last_detection_cm[1]) * 100.0, 1) if self._enemy_tracker._last_detection_cm is not None else None,
                     # Enemy bounding box (contour bounding rect in cm)
                     "eb": self._get_enemy_bbox_cm() if has_enemy else None,
                     # FPS

@@ -77,7 +77,7 @@ def main():
                     brick_steering = -1.0
                 arena.brick.apply_drive(brick_throttle, brick_steering, arena.cfg)
 
-            # Enemy: Arrow keys
+            # Enemy: Arrow keys (only apply drive if keys pressed)
             enemy_throttle = 0.0
             enemy_steering = 0.0
             if keys[pygame.K_UP]:
@@ -88,7 +88,8 @@ def main():
                 enemy_steering = 1.0
             elif keys[pygame.K_RIGHT]:
                 enemy_steering = -1.0
-            arena.enemy.apply_drive(enemy_throttle, enemy_steering, arena.cfg)
+            if abs(enemy_throttle) > 0.01 or abs(enemy_steering) > 0.01:
+                arena.enemy.apply_drive(enemy_throttle, enemy_steering, arena.cfg)
 
             arena.step()
 

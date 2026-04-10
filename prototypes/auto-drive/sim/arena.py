@@ -27,6 +27,9 @@ class SimRobot:
         self.depth = depth    # X-axis (forward)
         self.mass = mass
         self.alive = True
+        self._driven_this_frame = False
+        self._throttle_input = 0.0
+        self._steering_input = 0.0
 
         moment = pymunk.moment_for_box(mass, (depth, width))
         self.body = pymunk.Body(mass, moment)
@@ -70,6 +73,7 @@ class SimRobot:
         When throttle/steering is zero, ESC actively brakes (no coasting)."""
         if not self.alive:
             return
+        self._driven_this_frame = True
         self._throttle_input = throttle
         self._steering_input = steering
 
@@ -83,15 +87,18 @@ class SimRobot:
             cos_a = math.cos(self.body.angle)
             sin_a = math.sin(self.body.angle)
             v_fwd = vx * cos_a + vy * sin_a
-            # Strong braking force opposing forward motion
-            brake = -v_fwd * self.mass * 40.0  # aggressive ESC brake
+            brake = -v_fwd * self.mass * 40.0
             self.body.apply_force_at_local_point((brake, 0), (0, 0))
 
         if abs(steering) > 0.01:
             self.body.torque += steering * cfg.max_torque
         else:
-            # Kill angular velocity when no steering input
             self.body.torque += -self.body.angular_velocity * self.mass * 50.0
+
+    def clear_drive_flag(self):
+        """Call at start of each frame. If apply_drive isn't called this frame,
+        the robot is unpowered — only ground friction applies, no ESC braking."""
+        self._driven_this_frame = False
 
     def apply_friction_forces(self, cfg):
         """Coulomb friction opposing forward motion. Applied BEFORE substeps."""
@@ -295,6 +302,10 @@ class SimArena:
         # Apply velocity damping AFTER substeps
         self.brick.apply_velocity_damping(self.cfg)
         self.enemy.apply_velocity_damping(self.cfg)
+
+        # Clear drive flags for next frame
+        self.brick.clear_drive_flag()
+        self.enemy.clear_drive_flag()
 
     def reset(self):
         """Reset both robots to starting positions."""

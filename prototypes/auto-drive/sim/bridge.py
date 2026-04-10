@@ -103,17 +103,27 @@ class SimBridge:
         self._prev_vy = ovy
 
         # Convert to body-frame acceleration and then to milligravity
+        # 1g = 980 cm/s^2, 1mg = 0.98 cm/s^2, so mg = cm_s2 / 0.98
         cos_a = math.cos(our_heading)
         sin_a = math.sin(our_heading)
         accel_fwd = ax * cos_a + ay * sin_a   # forward
         accel_lat = -ax * sin_a + ay * cos_a   # lateral
-        accel_fwd_mg = accel_fwd / 9.80  # cm/s^2 to milligravity (0.98 cm/s^2 per mg)
-        accel_lat_mg = accel_lat / 9.80
+        accel_fwd_mg = accel_fwd / 0.98
+        accel_lat_mg = accel_lat / 0.98
+        # Add simulated motor/floor vibration (~200mg baseline) so
+        # IMU-based stuck detection works (real robot has constant vibration)
+        import random
+        accel_fwd_mg += random.gauss(0, 200)
+        accel_lat_mg += random.gauss(0, 150)
 
-        # Distance
+        # Distance — edge-to-edge, not center-to-center
+        # Subtract half-depths along the line between robots so thresholds
+        # work the same as real CV (where ArUco is near robot center)
         dx = ex - ox
         dy = ey - oy
-        distance = math.sqrt(dx * dx + dy * dy)
+        center_dist = math.sqrt(dx * dx + dy * dy)
+        edge_offset = self.robot.depth / 2 + enemy.depth / 2
+        distance = max(0.0, center_dist - edge_offset)
 
         # Pack context
         ctx = BattleContext(
@@ -131,7 +141,7 @@ class SimBridge:
             our_detected=True,
             accel_x_mg=accel_fwd_mg,
             accel_y_mg=accel_lat_mg,
-            throttle_cmd=self._last_output.throttle,
+            throttle_cmd=self._last_output.throttle if self._last_output.target_omega_dps is None else self._last_output.target_speed,
         )
 
         # Tick the battle controller

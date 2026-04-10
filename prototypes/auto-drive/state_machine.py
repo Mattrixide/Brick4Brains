@@ -217,9 +217,14 @@ class BattleController:
         # Goto center
         self._goto_center_target: tuple[float, float] | None = None
 
-        # Lost ArUco oscillation
+        # Lost ArUco recovery
         self._lost_aruco_t: float = 0.0
         self._lost_aruco_phase: int = -1
+        self._lost_aruco_target_heading: float = 0.0
+
+        # Reorient cycle detection
+        self._reorient_count: int = 0
+        self._reorient_window_start: float = 0.0
 
         # Wall stuck counter
         self._wall_stuck_frames: int = 0
@@ -364,6 +369,7 @@ class BattleController:
                         # Give up — enter lost_aruco
                         if current != "lost_aruco":
                             self.machine.set_state("lost_aruco")
+                            self._lost_aruco_t = 0.0  # reset so _action_lost_aruco starts fresh
                             log.info("[battle] LOST ARUCO — giving up, waiting for re-acquisition")
                         return self._action_lost_aruco(ctx, now)
                     else:
@@ -501,6 +507,9 @@ class BattleController:
         self._pin_entry_time = 0.0
         self._last_impact_time = 0.0
         self._log_t = 0.0
+        self._lost_aruco_t = 0.0
+        self._reorient_count = 0
+        self._reorient_window_start = 0.0
         self.pin_timer.reset()
 
     # -- Smart re-engagement ------------------------------------------------
@@ -741,6 +750,18 @@ class BattleController:
 
         # Reorient if facing away from enemy
         if alpha_abs > math.radians(110):
+            # Track reorient cycles — if too many in a short window, give up
+            if now - self._reorient_window_start > 5.0:
+                self._reorient_count = 0
+                self._reorient_window_start = now
+            self._reorient_count += 1
+            if self._reorient_count > 3:
+                log.info("[pursue] REORIENT cycling %d times in 5s — dropping to lost_target",
+                         self._reorient_count)
+                self._reorient_count = 0
+                self._enter_lost_target(now)
+                return self._action_lost_target(ctx, now)
+
             log.info("[pursue] REORIENT triggered: alpha=%.0f°", math.degrees(alpha))
             self.machine.set_state("charge_reorient")
             self._reorient_timer = now
@@ -786,6 +807,12 @@ class BattleController:
         if elapsed < 0.25:
             return BattleOutput(target_omega_dps=0.0, target_speed=-0.35)
 
+        # Hard timeout — applies regardless of enemy_pos
+        if elapsed > 1.5:
+            self._reorient_timer = None
+            self.machine.set_state("charge_pursue")
+            return self._action_charge_pursue(ctx, now)
+
         # Phase 2: Spin to face enemy
         if ctx.enemy_pos is not None:
             desired = math.atan2(
@@ -801,12 +828,6 @@ class BattleController:
 
             omega = -300.0 if alpha > 0 else 300.0
             return BattleOutput(target_omega_dps=omega, target_speed=0.25)
-
-        # Timeout after 1.5s total
-        if elapsed > 1.5:
-            self._reorient_timer = None
-            self.machine.set_state("charge_pursue")
-            return self._action_charge_pursue(ctx, now)
 
         return BattleOutput(target_omega_dps=300.0, target_speed=0.25)
 
@@ -1096,6 +1117,7 @@ class BattleController:
             # If retreat was due to ArUco loss and still blind, don't drive blind
             if self._last_retreat_reason == "aruco_lost" and not ctx.our_detected:
                 self.machine.set_state("lost_aruco")
+                self._lost_aruco_t = 0.0  # reset so _action_lost_aruco starts fresh
                 log.info("[battle] RETREAT ended blind — waiting for ArUco")
                 return BattleOutput()
             elif self.cfg.strategy == "evade":
@@ -1269,20 +1291,46 @@ class BattleController:
     # -- Lost ArUco action --------------------------------------------------
 
     def _action_lost_aruco(self, ctx: BattleContext, now: float) -> BattleOutput:
-        """Own position lost — reverse straight back until ArUco is visible.
+        """Own position lost — drive toward arena center to get back into
+        camera view.
 
-        Most common cause: marker pressed against wall during pin.
-        Driving forward would push back into the wall and hide the marker more.
-        Reverse pulls away from the wall to re-expose it.
+        Uses last known position to compute heading toward (0, 0) and drives
+        forward at 0.5 power for up to 2 seconds.  If that doesn't recover
+        the marker, spin slowly to search.
         """
         # ArUco re-acquired → snap back to normal
         if ctx.our_detected:
             log.info("[battle] LOST ARUCO — re-acquired, re-engaging")
+            self._lost_aruco_t = 0.0
             self._reengage(ctx)
             return BattleOutput()
 
-        # Reverse straight back at half speed using gyro heading hold
-        return BattleOutput(target_omega_dps=0.0, target_speed=-0.5)
+        # First frame — compute heading toward arena center from last known pos
+        if self._lost_aruco_t == 0.0:
+            self._lost_aruco_t = now
+            dx = 0.0 - self._last_aruco_x
+            dy = 0.0 - self._last_aruco_y
+            self._lost_aruco_target_heading = math.atan2(dy, dx)
+            log.info("[battle] LOST ARUCO — driving toward center from (%.0f, %.0f), heading %.0f°",
+                     self._last_aruco_x, self._last_aruco_y,
+                     math.degrees(self._lost_aruco_target_heading))
+
+        elapsed = now - self._lost_aruco_t
+
+        # Phase 1 (0-2s): drive toward arena center at 0.5 power
+        if elapsed < 2.0:
+            imu_heading_rad = math.radians(ctx.imu_heading_deg)
+            alpha = _angle_diff(self._lost_aruco_target_heading, imu_heading_rad)
+            omega = -150.0 * alpha
+            omega = max(-200.0, min(200.0, omega))
+            return BattleOutput(target_omega_dps=omega, target_speed=0.5)
+
+        # Phase 2 (2-4s): slow spin to search for marker
+        if elapsed < 4.0:
+            return BattleOutput(target_omega_dps=120.0, target_speed=0.0)
+
+        # Phase 3 (4s+): stop
+        return BattleOutput(target_omega_dps=0.0, target_speed=0.0)
 
     # -- Victory dance action -----------------------------------------------
 

@@ -86,12 +86,17 @@ class IMUPoller:
 class TelemetryReceiver:
     """Receives IMU telemetry from ESP32 on UDP port 4211.
 
-    Packet format (20 bytes, little-endian):
-        float32 heading     (degrees)
-        float32 gyro_z      (dps)
-        float32 accel_x     (mg)
-        float32 accel_y     (mg)
-        uint32  timestamp   (millis on ESP32)
+    Packet format (32 bytes, little-endian):
+        float32 heading           (degrees)
+        float32 gyro_z            (dps)
+        float32 accel_x           (mg)
+        float32 accel_y           (mg)
+        uint32  timestamp         (millis on ESP32)
+        uint16  imu_check_fails   (consecutive checkStatus failures)
+        uint16  imu_dt_skips      (consecutive dt > 10ms skips)
+        uint32  imu_fails_total   (lifetime checkStatus failures)
+        uint32  reserved
+    Also accepts legacy 20-byte packets (no IMU health fields).
     """
 
     def __init__(self, port=4211):
@@ -109,6 +114,11 @@ class TelemetryReceiver:
         self.esp_timestamp = 0
         self.last_recv_time = 0.0
         self.packets_received = 0
+
+        # IMU health debug counters
+        self.imu_check_fails = 0
+        self.imu_dt_skips = 0
+        self.imu_fails_total = 0
 
     def start(self):
         """Start background receiver thread."""
@@ -138,12 +148,24 @@ class TelemetryReceiver:
                 "<ffffI", data[:20]
             )
 
+            # Parse IMU health fields from expanded 32-byte packet
+            imu_fails = 0
+            imu_dt = 0
+            imu_fails_total = 0
+            if len(data) >= 32:
+                imu_fails, imu_dt, imu_fails_total = struct.unpack(
+                    "<HHI", data[20:28]
+                )
+
             with self._lock:
                 self.heading = heading
                 self.gyro_z = gyro_z
                 self.accel_x = accel_x
                 self.accel_y = accel_y
                 self.esp_timestamp = timestamp
+                self.imu_check_fails = imu_fails
+                self.imu_dt_skips = imu_dt
+                self.imu_fails_total = imu_fails_total
                 self.last_recv_time = time.monotonic()
                 self.packets_received += 1
 
@@ -158,6 +180,9 @@ class TelemetryReceiver:
                 "esp_timestamp": self.esp_timestamp,
                 "age_ms": (time.monotonic() - self.last_recv_time) * 1000
                           if self.last_recv_time > 0 else float("inf"),
+                "imu_check_fails": self.imu_check_fails,
+                "imu_dt_skips": self.imu_dt_skips,
+                "imu_fails_total": self.imu_fails_total,
             }
 
     @property

@@ -1,11 +1,14 @@
 """Physics arena and robot bodies for the combat simulator."""
 import json
+import logging
 import math
 import os
 
 import pymunk
 
 from .config import SimConfig
+
+log = logging.getLogger(__name__)
 
 AUTO_DRIVE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
@@ -201,6 +204,7 @@ class SimRobot:
 
     def reset(self, x, y, heading_deg):
         """Reset robot to starting position."""
+        self.body.body_type = pymunk.Body.DYNAMIC  # restore if frozen
         self.body.position = (x, y)
         self.body.angle = math.radians(heading_deg)
         self.body.velocity = (0, 0)
@@ -235,6 +239,8 @@ class SimArena:
         # Pit sensor
         self.pit_center = None
         self.pit_radius = None
+        self._robots_in_lip = set()
+        self._robots_in_pit = {}
         if battle_cfg and "pit_x_cm" in battle_cfg:
             self.pit_center = (battle_cfg["pit_x_cm"], battle_cfg["pit_y_cm"])
             self.pit_radius = battle_cfg["pit_radius_cm"]
@@ -273,54 +279,53 @@ class SimArena:
             self.space.add(seg)
 
     def _create_pit(self):
-        """Create a square pit with 1-inch lip and sensor inside."""
+        """Create pit — no pymunk shapes, handled purely in step()."""
+        # No pymunk sensors needed — we check distance each frame
+        pass
+
+    def _apply_pit_forces(self):
+        """Lip resistance + pit elimination, checked each frame by distance.
+
+        The lip acts like a speed bump: it opposes the robot's velocity
+        toward the pit, not a constant force. A slow approach gets stopped,
+        a fast ram blows through.
+        """
         cx, cy = self.pit_center
-        r = self.pit_radius  # half-width of the square
-        lip = 2.54  # 1 inch lip around pit edge
+        r = self.pit_radius
+        lip = 5.0  # ~2 inches effective lip zone (wider for physics stability)
 
-        # Pit lip: physical wall segments around the pit perimeter
-        # Robots bump into this before falling in
-        lip_corners = [
-            (cx - r - lip, cy - r - lip),
-            (cx + r + lip, cy - r - lip),
-            (cx + r + lip, cy + r + lip),
-            (cx - r - lip, cy + r + lip),
-        ]
-        for i in range(4):
-            a = lip_corners[i]
-            b = lip_corners[(i + 1) % 4]
-            seg = pymunk.Segment(self.space.static_body, a, b, lip)
-            seg.elasticity = 0.1  # low bounce on pit lip
-            seg.friction = 0.5
-            self.space.add(seg)
+        for robot in (self.brick, self.enemy):
+            if not robot.alive:
+                continue
+            rx, ry = robot.position
 
-        # Pit sensor inside the lip — triggers elimination
-        vertices = [
-            (cx - r, cy - r),
-            (cx + r, cy - r),
-            (cx + r, cy + r),
-            (cx - r, cy + r),
-        ]
-        pit_body = self.space.static_body
-        pit_shape = pymunk.Poly(pit_body, vertices)
-        pit_shape.sensor = True
-        pit_shape.collision_type = 2
-        self.space.add(pit_shape)
-        self.pit_shape = pit_shape
+            # Check zones
+            in_pit = abs(rx - cx) < r and abs(ry - cy) < r
+            in_lip = (abs(rx - cx) < r + lip and abs(ry - cy) < r + lip) and not in_pit
 
-        # Collision handler: robot (1) vs pit (2)
-        if self.cfg.pit_elimination:
-            def _pit_begin(arbiter, space, data):
-                for shape in arbiter.shapes:
-                    if shape.collision_type == 1:
-                        for robot in (self.brick, self.enemy):
-                            if robot.shape is shape:
-                                robot.freeze()
-
-            self.space.on_collision(
-                collision_type_a=1, collision_type_b=2,
-                begin=_pit_begin,
-            )
+            if in_pit:
+                # Inside pit — count frames, eliminate after threshold
+                key = robot.name
+                self._robots_in_pit[key] = self._robots_in_pit.get(key, 0) + 1
+                if self._robots_in_pit[key] >= 8:  # ~0.13s to fall in
+                    robot.freeze()
+                    log.info("[pit] %s eliminated", key)
+            elif in_lip:
+                # On the lip — gentle speed bump (one-time 15cm/s reduction on entry)
+                self._robots_in_pit.pop(robot.name, None)
+                lip_key = robot.name + "_lip"
+                if lip_key not in self._robots_in_pit:
+                    self._robots_in_pit[lip_key] = True
+                    vx, vy = robot.body.velocity
+                    speed = math.hypot(vx, vy)
+                    if 3 < speed < 40:
+                        # Only slow down gentle approaches, not rams
+                        new_speed = max(0, speed - 15.0)
+                        scale = new_speed / speed if speed > 0 else 0
+                        robot.body.velocity = (vx * scale, vy * scale)
+            else:
+                self._robots_in_pit.pop(robot.name, None)
+                self._robots_in_pit.pop(robot.name + "_lip", None)
 
     def step(self, dt=None):
         """Advance physics by one render frame."""
@@ -341,6 +346,10 @@ class SimArena:
         # Apply velocity damping AFTER substeps
         self.brick.apply_velocity_damping(self.cfg)
         self.enemy.apply_velocity_damping(self.cfg)
+
+        # Pit lip resistance + elimination (after substeps so velocity is stable)
+        if self.pit_center:
+            self._apply_pit_forces()
 
         # Clear drive flags for next frame
         self.brick.clear_drive_flag()

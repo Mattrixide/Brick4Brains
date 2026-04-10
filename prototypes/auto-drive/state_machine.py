@@ -1401,12 +1401,27 @@ class BattleController:
     # -- Victory dance action -----------------------------------------------
 
     def _action_victory_dance(self, ctx: BattleContext, now: float) -> BattleOutput:
-        """Post-match celebration spin."""
+        """Post-match: drive to arena center, then spin."""
         if self._victory_start is None:
             self._victory_start = now
 
         elapsed = now - self._victory_start
-        if elapsed < self.cfg.victory_dance_duration_s:
+
+        # Phase 1 (0-3s): drive to arena center
+        if elapsed < 3.0:
+            dist_to_center = math.hypot(ctx.our_pos[0], ctx.our_pos[1])
+            if dist_to_center < 15:
+                # Close enough — start spinning early
+                return BattleOutput(target_omega_dps=360.0, target_speed=0.0)
+            desired = math.atan2(-ctx.our_pos[1], -ctx.our_pos[0])
+            alpha = _angle_diff(desired, ctx.our_heading_rad)
+            omega = -200.0 * alpha
+            omega = max(-300.0, min(300.0, omega))
+            speed = min(0.6, dist_to_center / 100.0 + 0.3)
+            return BattleOutput(target_omega_dps=omega, target_speed=speed)
+
+        # Phase 2 (3-6s): victory spin
+        if elapsed < 3.0 + self.cfg.victory_dance_duration_s:
             return BattleOutput(target_omega_dps=360.0, target_speed=0.0)
 
         self._dance_finished = True

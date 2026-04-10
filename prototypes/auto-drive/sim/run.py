@@ -230,8 +230,11 @@ def main():
                     brick_steering = -1.0
                 arena.brick.apply_drive(brick_throttle, brick_steering, arena.cfg)
 
-            # Enemy: manual (arrow keys) or AI mode
-            if enemy_ctrl.mode == "manual":
+            # Enemy: freeze when match is over, otherwise drive
+            match_over = brick_ai and match_started and brick_bridge.match_timer.is_expired
+            if match_over:
+                pass  # enemy stops — match is over
+            elif enemy_ctrl.mode == "manual":
                 enemy_throttle = 0.0
                 enemy_steering = 0.0
                 if keys[pygame.K_UP]:

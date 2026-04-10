@@ -222,16 +222,18 @@ class SimArena:
             self._create_pit()
 
         # Create robots
+        # Brick: lower-right, facing upper-left
         self.brick = SimRobot(
-            self.space, -40, 0, 0,
+            self.space, 69, -85, 135,
             self.cfg.brick_width_cm, self.cfg.brick_depth_cm,
             self.cfg.brick_mass_kg, name="brick",
         )
         self.brick.shape.elasticity = self.cfg.robot_elasticity
         self.brick.shape.friction = self.cfg.robot_friction
 
+        # Enemy: upper-left, 12" off corner, facing lower-right
         self.enemy = SimRobot(
-            self.space, 40, 0, 180,
+            self.space, -126, 110, -45,
             self.cfg.enemy_width_cm, self.cfg.enemy_depth_cm,
             self.cfg.enemy_mass_kg, name="enemy",
         )
@@ -309,5 +311,5 @@ class SimArena:
 
     def reset(self):
         """Reset both robots to starting positions."""
-        self.brick.reset(-40, 0, 0)
-        self.enemy.reset(40, 0, 180)
+        self.brick.reset(69, -85, 135)
+        self.enemy.reset(-126, 110, -45)

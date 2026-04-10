@@ -372,7 +372,7 @@ class BattleController:
                     pass  # not enough history yet, don't reset counter
 
             # Stuck detection — expensive (position history scan), check last
-            if (current not in ("unstick", "evade_retreat", "evade_reposition", "wall_reverse")
+            if (current not in ("unstick", "evade_retreat", "evade_reposition", "wall_reverse", "pin")
                     and self._push_commit_timer is None):
                 if self._is_stuck(ctx):
                     self._enter_unstick()

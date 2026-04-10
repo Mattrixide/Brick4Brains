@@ -150,9 +150,12 @@ def main():
     logging_on = False
     strategies = ["charge", "pit"]
     strategy_idx = 0
+    SPEEDS = [0.5, 1.0, 2.0, 4.0]
+    speed_idx = 1
     brick_bridge = SimBridge(arena.brick, cfg, strategy_override=strategies[strategy_idx])
     logger = SimLogger(arena, brick_bridge)
     enemy_ctrl = EnemyController()
+    font_small = pygame.font.SysFont("consolas", 12)
     font = pygame.font.SysFont("consolas", 14)
     font_large = pygame.font.SysFont("consolas", 18)
 
@@ -187,6 +190,10 @@ def main():
                                     pygame.K_4, pygame.K_5, pygame.K_6):
                     mode_idx = event.key - pygame.K_1
                     enemy_ctrl.set_mode(MODES[mode_idx])
+                elif event.key in (pygame.K_EQUALS, pygame.K_PLUS, pygame.K_KP_PLUS):
+                    speed_idx = min(len(SPEEDS) - 1, speed_idx + 1)
+                elif event.key in (pygame.K_MINUS, pygame.K_KP_MINUS):
+                    speed_idx = max(0, speed_idx - 1)
                 elif event.key == pygame.K_r:
                     if logging_on:
                         logger.stop()
@@ -199,6 +206,8 @@ def main():
 
         # --- Input + Physics (only when running) ---
         dt = 1.0 / cfg.render_fps
+        sim_speed = SPEEDS[speed_idx]
+        effective_dt = dt * sim_speed
         if not paused:
             keys = pygame.key.get_pressed()
 
@@ -207,7 +216,7 @@ def main():
                 if not match_started:
                     brick_bridge.start_match(arena.enemy)
                     match_started = True
-                brick_bridge.tick(dt, arena.enemy)
+                brick_bridge.tick(effective_dt, arena.enemy)
             else:
                 brick_throttle = 0.0
                 brick_steering = 0.0
@@ -236,54 +245,74 @@ def main():
                 if abs(enemy_throttle) > 0.01 or abs(enemy_steering) > 0.01:
                     arena.enemy.apply_drive(enemy_throttle, enemy_steering, arena.cfg)
             else:
-                result = enemy_ctrl.get_drive(arena.enemy, arena.brick, dt, arena.cfg)
+                result = enemy_ctrl.get_drive(arena.enemy, arena.brick, effective_dt, arena.cfg)
                 if result is not None:
                     arena.enemy.apply_drive(result[0], result[1], arena.cfg)
 
-            arena.step()
+            arena.step(effective_dt)
 
             # Log frame
             if logging_on:
-                logger.log_frame(dt)
+                logger.log_frame(effective_dt)
 
         # --- Render ---
         renderer.draw(screen, bridge=brick_bridge if brick_ai else None)
 
         # --- HUD ---
+        y_hud = 10
+
+        # State + speed indicator on same line
         state_text = "PAUSED" if paused else "RUNNING"
         state_color = (255, 255, 0) if paused else (0, 255, 0)
         label = font_large.render(state_text, True, state_color)
-        screen.blit(label, (10, 10))
+        screen.blit(label, (10, y_hud))
+        if sim_speed != 1.0:
+            spd_label = font_large.render(f" {sim_speed}x", True, (200, 200, 0))
+            screen.blit(spd_label, (10 + label.get_width(), y_hud))
+        y_hud += 24
 
-        if brick_ai:
-            ai_label = font.render(f"AI: {brick_bridge.state}  [{strategies[strategy_idx].upper()}]", True, (0, 200, 255))
-            screen.blit(ai_label, (10, 75))
-
-        if enemy_ctrl.mode != "manual":
-            enemy_mode_label = font.render(f"Enemy: {enemy_ctrl.mode.upper()}", True, (255, 160, 0))
-            screen.blit(enemy_mode_label, (10, 95))
-
+        # Robot speeds
         bv = arena.brick.velocity
         brick_speed = math.hypot(bv[0], bv[1])
         ev = arena.enemy.velocity
         enemy_speed = math.hypot(ev[0], ev[1])
 
-        screen.blit(font.render(
-            f"Brick: {brick_speed:.0f} cm/s  {'DEAD' if not arena.brick.alive else ''}",
-            True, (0, 180, 0)), (10, 35))
-        screen.blit(font.render(
-            f"Enemy: {enemy_speed:.0f} cm/s  {'DEAD' if not arena.enemy.alive else ''}",
-            True, (200, 0, 0)), (10, 55))
+        brick_status = "DEAD" if not arena.brick.alive else f"{brick_speed:.0f} cm/s"
+        enemy_status = "DEAD" if not arena.enemy.alive else f"{enemy_speed:.0f} cm/s"
+        screen.blit(font.render(f"Brick: {brick_status}", True, (0, 180, 0)), (10, y_hud))
+        y_hud += 18
+        screen.blit(font.render(f"Enemy: {enemy_status}", True, (200, 0, 0)), (10, y_hud))
+        y_hud += 22
 
-        # Log indicator
+        # AI / enemy mode info
+        if brick_ai:
+            ai_label = font.render(f"AI: {brick_bridge.state}  [{strategies[strategy_idx].upper()}]", True, (0, 200, 255))
+            screen.blit(ai_label, (10, y_hud))
+            y_hud += 18
+        if enemy_ctrl.mode != "manual":
+            enemy_mode_label = font.render(f"Enemy: {enemy_ctrl.mode.upper()}", True, (255, 160, 0))
+            screen.blit(enemy_mode_label, (10, y_hud))
+
+        # --- Bottom bar ---
+        bar_y = win_size - 22
+
+        # Controls hint (left)
+        hint = font_small.render(
+            "WASD/Arrows=Drive  B=AI  T=Strat  1-6=Enemy  +/-=Speed  L=Log  Space=Pause  R=Reset",
+            True, (120, 120, 120))
+        screen.blit(hint, (10, bar_y))
+
+        # Right-aligned indicators
+        right_x = win_size - 10
         if logging_on:
-            log_label = font.render("REC", True, (255, 0, 0))
-            screen.blit(log_label, (win_size - 40, 10))
-
-        hint = font.render(
-            "WASD=Brick  Arrows=Enemy  B=AI  T=Strat  1-6=EnemyMode  L=Log  Space=Pause  R=Reset",
-            True, (140, 140, 140))
-        screen.blit(hint, (10, win_size - 25))
+            rec_label = font.render("REC", True, (255, 0, 0))
+            right_x -= rec_label.get_width()
+            screen.blit(rec_label, (right_x, bar_y - 2))
+            right_x -= 10
+        if sim_speed != 1.0:
+            spd = font.render(f"{sim_speed}x", True, (200, 200, 0))
+            right_x -= spd.get_width()
+            screen.blit(spd, (right_x, bar_y - 2))
 
         pygame.display.flip()
         clock.tick(cfg.render_fps)

@@ -110,6 +110,10 @@ class EnemyController:
         """Reset state (call on arena reset)."""
         self._ai_bridge = None
         self._ai_match_started = False
+        if hasattr(self, '_waypoints'):
+            del self._waypoints
+        if hasattr(self, '_wander_angle'):
+            del self._wander_angle
 
     def get_drive(self, enemy: SimRobot, brick: SimRobot, dt: float, cfg: SimConfig):
         """Return (throttle, steering) or None if AI mode handles forces internally."""
@@ -137,104 +141,174 @@ class EnemyController:
         return (0.8, steering)
 
     def _flee(self, enemy: SimRobot, brick: SimRobot):
-        """Reynolds steering: wall whiskers + pit repulsion + flee + wander."""
+        """Waypoint patrol + flee from Brick. Always moving, never gets stuck."""
+        import random
         ex, ey = enemy.position
         bx, by = brick.position
         heading = enemy.heading_rad
         dist_to_brick = math.hypot(ex - bx, ey - by)
 
-        # === Steering forces (dx, dy vectors) ===
-        fx, fy = 0.0, 0.0  # accumulated force
+        # === Generate safe waypoints on first call ===
+        if not hasattr(self, '_waypoints') or not self._waypoints:
+            self._generate_waypoints()
+            self._wp_idx = 0
 
-        # 1. WALL AVOIDANCE (whiskers) — highest priority
-        # Cast 3 rays: forward, +30deg, -30deg
-        whisker_len = 60.0  # lookahead distance
-        for angle_offset in [0, 0.5, -0.5]:  # ~0, +30deg, -30deg
-            ray_angle = heading + angle_offset
-            ray_ex = ex + math.cos(ray_angle) * whisker_len
-            ray_ey = ey + math.sin(ray_angle) * whisker_len
-            # Test against each wall segment
-            for j in range(len(self._corners)):
-                hit = _ray_segment_intersect(
-                    ex, ey, ray_ex, ray_ey,
-                    self._corners[j][0], self._corners[j][1],
-                    self._corners[(j+1) % len(self._corners)][0],
-                    self._corners[(j+1) % len(self._corners)][1],
-                )
-                if hit is not None:
-                    hx, hy, t = hit
-                    dist = t * whisker_len
-                    if dist < whisker_len:
-                        # Push away from wall, stronger when closer
-                        strength = 5.0 * (1.0 - dist / whisker_len) ** 2
-                        # Wall normal (from hit point back toward robot)
-                        nx = ex - hx
-                        ny = ey - hy
-                        nl = math.hypot(nx, ny)
-                        if nl > 0.01:
-                            fx += (nx / nl) * strength
-                            fy += (ny / nl) * strength
+        # === Pick target: current waypoint or flee from Brick ===
+        wp = self._waypoints[self._wp_idx]
 
-        # 2. PIT AVOIDANCE — strong repulsion
+        # If Brick is close, pick the waypoint farthest from Brick
+        if dist_to_brick < 60:
+            best_idx = max(range(len(self._waypoints)),
+                          key=lambda i: math.hypot(self._waypoints[i][0] - bx,
+                                                    self._waypoints[i][1] - by))
+            wp = self._waypoints[best_idx]
+            self._wp_idx = best_idx
+
+        # Reached waypoint? Move to next (skip if path crosses pit)
+        dist_to_wp = math.hypot(ex - wp[0], ey - wp[1])
+        if dist_to_wp < 20:
+            # Try next waypoints, skip any that require passing near pit
+            for attempt in range(len(self._waypoints)):
+                self._wp_idx = (self._wp_idx + 1) % len(self._waypoints)
+                next_wp = self._waypoints[self._wp_idx]
+                if self._pit:
+                    # Check if midpoint of path is too close to pit
+                    mid_x = (ex + next_wp[0]) / 2
+                    mid_y = (ey + next_wp[1]) / 2
+                    mid_pit = math.hypot(mid_x - self._pit[0], mid_y - self._pit[1])
+                    if mid_pit < self._pit_danger + 50:
+                        continue  # skip this waypoint
+                break
+            wp = self._waypoints[self._wp_idx]
+            dist_to_wp = math.hypot(ex - wp[0], ey - wp[1])
+
+        # === HARD PIT GEOFENCE (absolute highest priority) ===
+        # Predict where we'll be in 0.5s and hard-brake if it's in the pit zone
+        if self._pit:
+            vx, vy = enemy.velocity
+            speed = math.hypot(vx, vy)
+            for lookahead in [0.15, 0.3, 0.5, 0.8, 1.2]:
+                future_x = ex + vx * lookahead
+                future_y = ey + vy * lookahead
+                future_pit = math.hypot(future_x - self._pit[0], future_y - self._pit[1])
+                if future_pit < self._pit_danger + 35:
+                    # Will enter pit zone — hard brake + steer away
+                    pit_dx = ex - self._pit[0]
+                    pit_dy = ey - self._pit[1]
+                    away = math.atan2(pit_dy, pit_dx)
+                    diff = _wrap_to_pi(away - heading)
+                    return (-1.5, _clamp(diff * 3.0, -1, 1))
+
+        # === Wall-jam escape FIRST (highest priority) ===
+        cur_speed = math.hypot(*enemy.velocity)
+        wall_dist, wall_away = _nearest_wall_info(ex, ey, self._corners)
+        if wall_dist < 25 and cur_speed < 10:
+            away_diff = _wrap_to_pi(wall_away - heading)
+            if abs(away_diff) > math.pi / 2:
+                return (-1.5, _clamp(away_diff * 2.0, -1, 1))
+            return (1.0, _clamp(away_diff * 2.0, -1, 1))
+
+        # === Pit avoidance: override target if anywhere near pit ===
         if self._pit:
             pit_dx = ex - self._pit[0]
             pit_dy = ey - self._pit[1]
             pit_dist = math.hypot(pit_dx, pit_dy)
-            danger = self._pit_danger + 30
-            if pit_dist < danger and pit_dist > 0.1:
-                strength = 4.0 * ((danger - pit_dist) / danger) ** 2
-                fx += (pit_dx / pit_dist) * strength
-                fy += (pit_dy / pit_dist) * strength
+            # Check if heading TOWARD pit
+            heading_to_pit = math.atan2(self._pit[1] - ey, self._pit[0] - ex)
+            heading_toward = abs(_wrap_to_pi(heading - heading_to_pit)) < math.pi / 2
 
-        # 3. FLEE from Brick — scaled by distance
-        if dist_to_brick > 0.1:
-            flee_dx = (ex - bx) / dist_to_brick
-            flee_dy = (ey - by) / dist_to_brick
-            if dist_to_brick < 40:
-                flee_strength = 3.0
-            elif dist_to_brick < 100:
-                flee_strength = 1.5
-            else:
-                flee_strength = 0.5
-            fx += flee_dx * flee_strength
-            fy += flee_dy * flee_strength
+            danger_zone = self._pit_danger + 80  # very wide
+            if pit_dist < danger_zone and heading_toward:
+                # Heading toward pit — steer away, slow down
+                away_angle = math.atan2(pit_dy, pit_dx)
+                angle_diff = _wrap_to_pi(away_angle - heading)
+                steering = _clamp(angle_diff * 3.0, -1, 1)
+                if pit_dist < self._pit_danger + 15:
+                    return (-1.5, steering)  # emergency reverse
+                # Gradual slowdown
+                frac = (pit_dist - self._pit_danger) / 60.0
+                pit_throttle = 0.3 + 0.5 * frac
+                return (pit_throttle, steering)
+            elif pit_dist < self._pit_danger + 50:
+                # Very close regardless of heading — always avoid
+                away_angle = math.atan2(pit_dy, pit_dx)
+                angle_diff = _wrap_to_pi(away_angle - heading)
+                steering = _clamp(angle_diff * 3.0, -1, 1)
+                return (-1.5, steering)
 
-        # 4. WANDER — Reynolds wander: jitter a target on a circle ahead
-        import random
-        if not hasattr(self, '_wander_angle'):
-            self._wander_angle = heading
-        self._wander_angle += random.gauss(0, 0.3)  # smooth random jitter
-        # Wander is the primary movement force — keeps robot moving always
-        wander_strength = 2.0 if dist_to_brick > 80 else 1.0
-        fx += math.cos(self._wander_angle) * wander_strength
-        fy += math.sin(self._wander_angle) * wander_strength
-
-        # === Convert force to throttle/steering ===
-        target_angle = math.atan2(fy, fx)
+        # === Steer toward waypoint ===
+        target_angle = math.atan2(wp[1] - ey, wp[0] - ex)
         angle_diff = _wrap_to_pi(target_angle - heading)
         steering = _clamp(angle_diff * 2.5, -1, 1)
 
-        # Wall-jam escape: if stopped near a wall, reverse to pull free
-        cur_speed = math.hypot(*enemy.velocity)
-        wall_dist, _ = _nearest_wall_info(ex, ey, self._corners)
-        if cur_speed < 3 and wall_dist < 25:
-            # Jammed against wall — reverse hard to pull away, then can turn
-            return (-1.0 * 1.5, steering)
-
-        # Speed: 1.5x boost, always moving (minimum 0.4)
-        SPEED_BOOST = 1.5
-        throttle = 0.7 * SPEED_BOOST
+        # === Speed ===
+        SPEED_BOOST = 1.2
         if dist_to_brick < 40:
-            throttle = 1.0 * SPEED_BOOST
-        if abs(angle_diff) > 1.2:
+            throttle = 0.8 * SPEED_BOOST  # escape
+        else:
+            throttle = 0.5 * SPEED_BOOST  # cruise (manageable speed for wall avoidance)
+
+        # Slow for sharp turns
+        if abs(angle_diff) > 1.0:
             throttle *= 0.5
         throttle = max(0.4, throttle)
 
-        # Reverse when facing wrong way and Brick is close
-        if dist_to_brick < 25 and abs(angle_diff) > math.pi * 0.6:
-            return (-1.0, steering)
-
         return (throttle, steering)
+
+    def _generate_waypoints(self):
+        """Generate safe patrol waypoints inside the arena, avoiding pit."""
+        # Compute arena center and safe interior points
+        xs = [c[0] for c in self._corners]
+        ys = [c[1] for c in self._corners]
+        cx = (min(xs) + max(xs)) / 2
+        cy = (min(ys) + max(ys)) / 2
+        half_w = (max(xs) - min(xs)) / 2
+        half_h = (max(ys) - min(ys)) / 2
+
+        # Generate points at ~60% of the way from center to each corner
+        # plus midpoints of edges, all pulled inward
+        self._waypoints = []
+        n = len(self._corners)
+        for i in range(n):
+            # Midpoint of each edge, pulled 40cm inward
+            ax, ay = self._corners[i]
+            bx, by = self._corners[(i + 1) % n]
+            mx = (ax + bx) / 2
+            my = (ay + by) / 2
+            # Pull toward center
+            dx, dy = cx - mx, cy - my
+            d = math.hypot(dx, dy)
+            if d > 0:
+                mx += dx / d * 50  # 50cm inward from wall midpoint
+                my += dy / d * 50
+
+            # Skip if too close to pit
+            if self._pit:
+                if math.hypot(mx - self._pit[0], my - self._pit[1]) < self._pit_danger + 50:
+                    continue
+            self._waypoints.append((mx, my))
+
+        # Add center
+        if self._pit:
+            if math.hypot(cx - self._pit[0], cy - self._pit[1]) > self._pit_danger + 50:
+                self._waypoints.append((cx, cy))
+        else:
+            self._waypoints.append((cx, cy))
+
+        # Add a few random interior points
+        import random
+        for _ in range(4):
+            px = cx + random.uniform(-half_w * 0.5, half_w * 0.5)
+            py = cy + random.uniform(-half_h * 0.5, half_h * 0.5)
+            if self._pit:
+                if math.hypot(px - self._pit[0], py - self._pit[1]) < self._pit_danger + 50:
+                    continue
+            self._waypoints.append((px, py))
+
+        # Shuffle for unpredictability
+        random.shuffle(self._waypoints)
+        if not self._waypoints:
+            self._waypoints = [(cx, cy)]  # fallback
 
     def _tick_ai(self, enemy: SimRobot, brick: SimRobot, dt: float, cfg: SimConfig):
         """Lazily create a SimBridge for the enemy and tick it."""

@@ -31,6 +31,21 @@ def _point_to_segment_dist(px, py, ax, ay, bx, by):
     return math.hypot(px - (ax + t * dx), py - (ay + t * dy))
 
 
+def _ray_segment_intersect(rx, ry, rex, rey, ax, ay, bx, by):
+    """Ray from (rx,ry)->(rex,rey) vs segment (ax,ay)-(bx,by).
+    Returns (hit_x, hit_y, t) where t is fraction along ray, or None."""
+    dx, dy = rex - rx, rey - ry
+    sx, sy = bx - ax, by - ay
+    denom = dx * sy - dy * sx
+    if abs(denom) < 1e-10:
+        return None
+    t = ((ax - rx) * sy - (ay - ry) * sx) / denom
+    u = ((ax - rx) * dy - (ay - ry) * dx) / denom
+    if 0 <= t <= 1 and 0 <= u <= 1:
+        return (rx + t * dx, ry + t * dy, t)
+    return None
+
+
 def _nearest_wall_info(x, y, corners):
     """Returns (min_distance, wall_normal_angle) to nearest wall segment."""
     min_dist = float('inf')
@@ -122,92 +137,102 @@ class EnemyController:
         return (0.8, steering)
 
     def _flee(self, enemy: SimRobot, brick: SimRobot):
+        """Reynolds steering: wall whiskers + pit repulsion + flee + wander."""
         ex, ey = enemy.position
         bx, by = brick.position
+        heading = enemy.heading_rad
         dist_to_brick = math.hypot(ex - bx, ey - by)
 
-        # Primary: angle away from Brick
-        flee_angle = math.atan2(ey - by, ex - bx)
+        # === Steering forces (dx, dy vectors) ===
+        fx, fy = 0.0, 0.0  # accumulated force
 
-        # Pit avoidance: strong repulsion from pit
+        # 1. WALL AVOIDANCE (whiskers) — highest priority
+        # Cast 3 rays: forward, +30deg, -30deg
+        whisker_len = 60.0  # lookahead distance
+        for angle_offset in [0, 0.5, -0.5]:  # ~0, +30deg, -30deg
+            ray_angle = heading + angle_offset
+            ray_ex = ex + math.cos(ray_angle) * whisker_len
+            ray_ey = ey + math.sin(ray_angle) * whisker_len
+            # Test against each wall segment
+            for j in range(len(self._corners)):
+                hit = _ray_segment_intersect(
+                    ex, ey, ray_ex, ray_ey,
+                    self._corners[j][0], self._corners[j][1],
+                    self._corners[(j+1) % len(self._corners)][0],
+                    self._corners[(j+1) % len(self._corners)][1],
+                )
+                if hit is not None:
+                    hx, hy, t = hit
+                    dist = t * whisker_len
+                    if dist < whisker_len:
+                        # Push away from wall, stronger when closer
+                        strength = 5.0 * (1.0 - dist / whisker_len) ** 2
+                        # Wall normal (from hit point back toward robot)
+                        nx = ex - hx
+                        ny = ey - hy
+                        nl = math.hypot(nx, ny)
+                        if nl > 0.01:
+                            fx += (nx / nl) * strength
+                            fy += (ny / nl) * strength
+
+        # 2. PIT AVOIDANCE — strong repulsion
         if self._pit:
             pit_dx = ex - self._pit[0]
             pit_dy = ey - self._pit[1]
             pit_dist = math.hypot(pit_dx, pit_dy)
-            if pit_dist < self._pit_danger + 40:
-                pit_away = math.atan2(pit_dy, pit_dx)
-                pit_weight = 1.0 - max(0, (pit_dist - self._pit_danger) / 40.0)
-                pit_weight = min(1.0, pit_weight)
-                flee_dx = math.cos(flee_angle) * (1 - pit_weight) + math.cos(pit_away) * pit_weight
-                flee_dy = math.sin(flee_angle) * (1 - pit_weight) + math.sin(pit_away) * pit_weight
-                flee_angle = math.atan2(flee_dy, flee_dx)
+            danger = self._pit_danger + 30
+            if pit_dist < danger and pit_dist > 0.1:
+                strength = 4.0 * ((danger - pit_dist) / danger) ** 2
+                fx += (pit_dx / pit_dist) * strength
+                fy += (pit_dy / pit_dist) * strength
 
-        # Wall avoidance: when near a wall, turn to run ALONG the wall
-        # instead of into it. Pick the tangent direction that's most away from Brick.
-        wall_dist, wall_away_angle = _nearest_wall_info(ex, ey, self._corners)
-        wall_threshold = 50.0
-
-        if wall_dist < wall_threshold:
-            wall_weight = (1.0 - wall_dist / wall_threshold) ** 0.5
-
-            # Two tangent options: +90° and -90° from wall normal
-            tang1 = wall_away_angle + math.pi / 2
-            tang2 = wall_away_angle - math.pi / 2
-
-            # Pick the tangent that leads more away from Brick
-            score1 = math.cos(tang1 - flee_angle)
-            score2 = math.cos(tang2 - flee_angle)
-            tangent = tang1 if score1 > score2 else tang2
-
-            # Near wall: blend between flee and tangent
-            # Very near wall (< 20cm): mostly tangent + push away from wall
-            if wall_dist < 20:
-                # Almost touching wall — run along it + push away
-                blend_dx = math.cos(tangent) * 0.7 + math.cos(wall_away_angle) * 0.3
-                blend_dy = math.sin(tangent) * 0.7 + math.sin(wall_away_angle) * 0.3
+        # 3. FLEE from Brick — scaled by distance
+        if dist_to_brick > 0.1:
+            flee_dx = (ex - bx) / dist_to_brick
+            flee_dy = (ey - by) / dist_to_brick
+            if dist_to_brick < 40:
+                flee_strength = 3.0
+            elif dist_to_brick < 100:
+                flee_strength = 1.5
             else:
-                blend_dx = math.cos(flee_angle) * (1 - wall_weight) + math.cos(tangent) * wall_weight
-                blend_dy = math.sin(flee_angle) * (1 - wall_weight) + math.sin(tangent) * wall_weight
+                flee_strength = 0.5
+            fx += flee_dx * flee_strength
+            fy += flee_dy * flee_strength
 
-            target_angle = math.atan2(blend_dy, blend_dx)
-        else:
-            target_angle = flee_angle
+        # 4. WANDER — Reynolds wander: jitter a target on a circle ahead
+        import random
+        if not hasattr(self, '_wander_angle'):
+            self._wander_angle = heading
+        self._wander_angle += random.gauss(0, 0.3)  # smooth random jitter
+        # Wander is the primary movement force — keeps robot moving always
+        wander_strength = 2.0 if dist_to_brick > 80 else 1.0
+        fx += math.cos(self._wander_angle) * wander_strength
+        fy += math.sin(self._wander_angle) * wander_strength
 
-        angle_diff = _wrap_to_pi(target_angle - enemy.heading_rad)
+        # === Convert force to throttle/steering ===
+        target_angle = math.atan2(fy, fx)
+        angle_diff = _wrap_to_pi(target_angle - heading)
         steering = _clamp(angle_diff * 2.5, -1, 1)
 
-        # Trapped detection: close to wall AND close to Brick = pinned
-        speed = math.hypot(*enemy.velocity)
-        if wall_dist < 25 and dist_to_brick < 35 and speed < 5:
-            # Pinned! Drive perpendicular to Brick (sidestep along wall)
-            brick_angle = math.atan2(by - ey, bx - ex)
-            perp1 = brick_angle + math.pi / 2
-            perp2 = brick_angle - math.pi / 2
-            s1 = abs(math.cos(perp1 - (wall_away_angle + math.pi / 2)))
-            s2 = abs(math.cos(perp2 - (wall_away_angle + math.pi / 2)))
-            escape_angle = perp1 if s1 > s2 else perp2
-            angle_diff = _wrap_to_pi(escape_angle - enemy.heading_rad)
-            steering = _clamp(angle_diff * 3.0, -1, 1)
-            if abs(angle_diff) > math.pi / 2:
-                return (-1.5, steering)  # reverse hard to escape
-            return (1.5, steering)  # boost to break free
+        # Wall-jam escape: if stopped near a wall, reverse to pull free
+        cur_speed = math.hypot(*enemy.velocity)
+        wall_dist, _ = _nearest_wall_info(ex, ey, self._corners)
+        if cur_speed < 3 and wall_dist < 25:
+            # Jammed against wall — reverse hard to pull away, then can turn
+            return (-1.0 * 1.5, steering)
 
-        # Speed: 1.5x boost so enemy can outrun Brick and force a chase
+        # Speed: 1.5x boost, always moving (minimum 0.4)
         SPEED_BOOST = 1.5
-        if dist_to_brick < 30:
+        throttle = 0.7 * SPEED_BOOST
+        if dist_to_brick < 40:
             throttle = 1.0 * SPEED_BOOST
-        elif dist_to_brick < 80:
-            throttle = 0.8 * SPEED_BOOST
-        else:
-            throttle = 0.6 * SPEED_BOOST
+        if abs(angle_diff) > 1.2:
+            throttle *= 0.5
+        throttle = max(0.4, throttle)
 
-        # When very close and facing wrong way, reverse
+        # Reverse when facing wrong way and Brick is close
         if dist_to_brick < 25 and abs(angle_diff) > math.pi * 0.6:
-            return (-0.8, steering)
-
-        # Slow for sharp turns but keep minimum speed
-        if abs(angle_diff) > 1.0:
-            throttle = max(0.3, throttle * 0.4)
+            return (-1.0, steering)
 
         return (throttle, steering)
 

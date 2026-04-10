@@ -192,10 +192,12 @@ class SimRobot:
         return world
 
     def freeze(self):
-        """Mark robot as eliminated."""
+        """Mark robot as eliminated — make body static so it stays in place."""
         self.alive = False
         self.body.velocity = (0, 0)
         self.body.angular_velocity = 0
+        # Make body static so it can't be pushed around
+        self.body.body_type = pymunk.Body.STATIC
 
     def reset(self, x, y, heading_deg):
         """Reset robot to starting position."""
@@ -271,16 +273,34 @@ class SimArena:
             self.space.add(seg)
 
     def _create_pit(self):
-        """Create a square pit sensor (matches real pit from 't' calibration)."""
+        """Create a square pit with 1-inch lip and sensor inside."""
         cx, cy = self.pit_center
         r = self.pit_radius  # half-width of the square
+        lip = 2.54  # 1 inch lip around pit edge
+
+        # Pit lip: physical wall segments around the pit perimeter
+        # Robots bump into this before falling in
+        lip_corners = [
+            (cx - r - lip, cy - r - lip),
+            (cx + r + lip, cy - r - lip),
+            (cx + r + lip, cy + r + lip),
+            (cx - r - lip, cy + r + lip),
+        ]
+        for i in range(4):
+            a = lip_corners[i]
+            b = lip_corners[(i + 1) % 4]
+            seg = pymunk.Segment(self.space.static_body, a, b, lip)
+            seg.elasticity = 0.1  # low bounce on pit lip
+            seg.friction = 0.5
+            self.space.add(seg)
+
+        # Pit sensor inside the lip — triggers elimination
         vertices = [
             (cx - r, cy - r),
             (cx + r, cy - r),
             (cx + r, cy + r),
             (cx - r, cy + r),
         ]
-
         pit_body = self.space.static_body
         pit_shape = pymunk.Poly(pit_body, vertices)
         pit_shape.sensor = True

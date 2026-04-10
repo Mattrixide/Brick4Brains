@@ -120,12 +120,23 @@ class SimRenderer:
         cx, cy = self.arena.pit_center
         r = self.arena.pit_radius
 
-        # Draw pit as square (matches real pit from 't' calibration)
+        lip = 2.54  # 1 inch lip around pit
+
+        # Lip (outer rectangle, filled dark red)
+        lip_corners = [
+            (cx - r - lip, cy - r - lip), (cx + r + lip, cy - r - lip),
+            (cx + r + lip, cy + r + lip), (cx - r - lip, cy + r + lip),
+        ]
+        lip_pts = [self.cm_to_px(x, y, screen) for x, y in lip_corners]
+        pygame.draw.polygon(screen, (100, 0, 0), lip_pts, 0)
+
+        # Pit opening (inner rectangle, filled black = the hole)
         corners = [
             (cx - r, cy - r), (cx + r, cy - r),
             (cx + r, cy + r), (cx - r, cy + r),
         ]
         pts = [self.cm_to_px(x, y, screen) for x, y in corners]
+        pygame.draw.polygon(screen, (10, 10, 10), pts, 0)
         pygame.draw.polygon(screen, PIT_COLOR, pts, 2)
 
         # Label

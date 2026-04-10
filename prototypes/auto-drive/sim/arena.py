@@ -210,7 +210,8 @@ class SimArena:
         self.space.gravity = (0, 0)  # top-down, no gravity
 
         # Load calibration data
-        floor_cal = _load_json("floor_calibration.json")
+        self.floor_cal = _load_json("floor_calibration.json")
+        floor_cal = self.floor_cal
         battle_cfg = _load_json("battle_config.json")
 
         # Build arena walls

@@ -427,6 +427,14 @@ function loadFiles(fileList) {
         for (const f of frames) {
           if (f.mp == null && f.phase != null) f.mp = f.phase;
         }
+        // Fix edx/edy logged in meters instead of cm (bug before fix)
+        // Detect: if edx exists and is much smaller than ex, it's in meters
+        for (const f of frames) {
+          if (f.edx != null && f.ex != null && Math.abs(f.ex) > 5
+              && Math.abs(f.edx) < 5 && Math.abs(f.ex / f.edx) > 50) {
+            f.edx *= 100; f.edy *= 100;
+          }
+        }
         // Fill in last-known-good position when od=False (ArUco lost → ox/oy default to 0,0)
         let lastGoodX = null, lastGoodY = null, lastGoodH = null;
         for (const f of frames) {

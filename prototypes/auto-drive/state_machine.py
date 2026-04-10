@@ -90,7 +90,7 @@ def _near_wall(x: float, y: float, threshold: float, arena_corners=None) -> bool
     (80cm from a wall is the middle of the arena, not "near wall").
     """
     if arena_corners and len(arena_corners) >= 3:
-        wall_threshold = min(threshold, 40.0)  # real distance: 40cm max
+        wall_threshold = min(threshold, 25.0)  # real distance: ~robot depth from wall
         min_dist = float('inf')
         n = len(arena_corners)
         for i in range(n):

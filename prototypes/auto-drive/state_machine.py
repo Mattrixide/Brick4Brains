@@ -916,7 +916,7 @@ class BattleController:
         self_dist_to_pit = math.hypot(
             ctx.our_pos[0] - pit[0], ctx.our_pos[1] - pit[1]
         )
-        if self_dist_to_pit < self.cfg.pit_danger_radius_cm:
+        if self_dist_to_pit < self.cfg.pit_danger_radius_cm + 25.0:
             self.machine.set_state("pit_abort")
             self._pit_abort_timer = now
             log.info("[battle] PIT ABORT — too close to pit (%.0fcm)", self_dist_to_pit)
@@ -983,8 +983,9 @@ class BattleController:
         self_dist = math.hypot(
             ctx.our_pos[0] - pit[0], ctx.our_pos[1] - pit[1]
         )
-        # Abort well before pit edge — robot body extends ~11cm past center
-        abort_dist = self.cfg.pit_danger_radius_cm + 15.0
+        # Abort well before pit edge — robot body extends ~11cm past center,
+        # plus need stopping distance at current speed
+        abort_dist = self.cfg.pit_danger_radius_cm + 25.0
         if self_dist < abort_dist:
             self.machine.set_state("pit_abort")
             self._pit_abort_timer = now
@@ -998,12 +999,18 @@ class BattleController:
             log.info("[battle] PIT COMMIT — enemy near pit (%.0fcm)", enemy_dist)
             return self._action_pit_commit(ctx, now)
 
+        # Push toward enemy, not directly toward pit — this keeps Brick
+        # on a path that goes through the enemy instead of around it
+        if ctx.enemy_detected and ctx.enemy_pos is not None:
+            target_x, target_y = ctx.enemy_pos
+        else:
+            target_x, target_y = pit
+
         desired_heading = math.atan2(
-            pit[1] - ctx.our_pos[1], pit[0] - ctx.our_pos[0]
+            target_y - ctx.our_pos[1], target_x - ctx.our_pos[0]
         )
         alpha = _angle_diff(desired_heading, ctx.our_heading_rad)
 
-        # Rate mode: controlled push toward pit
         Kp_omega = 200.0
         omega = -Kp_omega * alpha
         omega = max(-300.0, min(300.0, omega))
@@ -1013,15 +1020,13 @@ class BattleController:
         if push_elapsed < 0.15:
             return BattleOutput(target_omega_dps=omega, target_speed=0.0)
 
-        # Speed scaled by distance to pit — never full speed
+        # Speed: slow and controlled, scaled by distance to pit
         danger = self.cfg.pit_danger_radius_cm
-        if self_dist < danger * 1.5:
-            speed = 0.25  # crawl near pit
-        elif self_dist < danger * 2.5:
-            speed = 0.5   # moderate
+        if self_dist < danger * 2.0:
+            speed = 0.2   # crawl when close to pit
         else:
-            speed = 0.7   # controlled, not full speed
-        speed *= math.cos(alpha) ** 2  # slow for turns
+            speed = 0.5   # moderate push
+        speed *= math.cos(alpha) ** 2
 
         return BattleOutput(target_omega_dps=omega, target_speed=speed)
 
@@ -1031,7 +1036,7 @@ class BattleController:
         self_dist = math.hypot(
             ctx.our_pos[0] - pit[0], ctx.our_pos[1] - pit[1]
         )
-        if self_dist < self.cfg.pit_radius_cm + 5:
+        if self_dist < self.cfg.pit_radius_cm + 20:
             self.machine.set_state("pit_abort")
             self._pit_abort_timer = now
             log.info("[battle] PIT ABORT — self too close during commit")

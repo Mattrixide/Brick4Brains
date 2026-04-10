@@ -80,7 +80,17 @@ class SimBridge:
             phase_final_s=bc.phase_final_s,
         )
         self._pin_timer = PinTimer(max_duration_s=bc.pin_duration_s)
-        self.controller = BattleController(bc, self.match_timer, self._pin_timer)
+        # Load arena corners for accurate wall detection
+        import json
+        arena_corners = None
+        floor_cal_path = os.path.join(AUTO_DRIVE_DIR, "floor_calibration.json")
+        if os.path.exists(floor_cal_path):
+            with open(floor_cal_path) as f:
+                floor_cal = json.load(f)
+            if "corners_ft" in floor_cal:
+                arena_corners = [tuple(c) for c in floor_cal["corners_ft"]]
+        self.controller = BattleController(bc, self.match_timer, self._pin_timer,
+                                           arena_corners=arena_corners)
 
     def start_match(self, enemy: SimRobot):
         """Start the match timer and transition controller out of 'wait'."""

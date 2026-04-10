@@ -68,8 +68,38 @@ def _angle_diff(a: float, b: float) -> float:
     return (d + math.pi) % (2.0 * math.pi) - math.pi
 
 
-def _near_wall(x: float, y: float, threshold: float) -> bool:
-    """Check if a position is near the arena wall."""
+def _point_to_segment_dist(px, py, ax, ay, bx, by):
+    """Distance from point (px,py) to line segment (ax,ay)-(bx,by)."""
+    dx, dy = bx - ax, by - ay
+    if dx == 0 and dy == 0:
+        return math.hypot(px - ax, py - ay)
+    t = max(0, min(1, ((px - ax) * dx + (py - ay) * dy) / (dx * dx + dy * dy)))
+    proj_x = ax + t * dx
+    proj_y = ay + t * dy
+    return math.hypot(px - proj_x, py - proj_y)
+
+
+def _near_wall(x: float, y: float, threshold: float, arena_corners=None) -> bool:
+    """Check if a position is near the arena wall.
+
+    Uses actual distance to wall polygon if arena_corners is provided,
+    otherwise falls back to simple coordinate threshold.
+
+    When using real wall distance, threshold is clamped to max 40cm
+    because the old abs(x) > N semantics don't translate to wall distance
+    (80cm from a wall is the middle of the arena, not "near wall").
+    """
+    if arena_corners and len(arena_corners) >= 3:
+        wall_threshold = min(threshold, 40.0)  # real distance: 40cm max
+        min_dist = float('inf')
+        n = len(arena_corners)
+        for i in range(n):
+            ax, ay = arena_corners[i]
+            bx, by = arena_corners[(i + 1) % n]
+            d = _point_to_segment_dist(x, y, ax, ay, bx, by)
+            if d < min_dist:
+                min_dist = d
+        return min_dist < wall_threshold
     return abs(x) > threshold or abs(y) > threshold
 
 
@@ -119,10 +149,12 @@ class BattleController:
         config: BattleConfig,
         match_timer: MatchTimer,
         pin_timer: PinTimer,
+        arena_corners=None,
     ):
         self.cfg = config
         self.match_timer = match_timer
         self.pin_timer = pin_timer
+        self._arena_corners = arena_corners  # calibrated wall polygon for _near_wall
 
         # Internal tracking
         self._acquire_count = 0
@@ -300,7 +332,7 @@ class BattleController:
                         self._push_commit_timer = now
                         self._push_commit_enemy_close = True
                         log.info("[battle] PUSH COMMIT — stall detected, committing for %.1fs", self.cfg.push_commit_s)
-                elif _near_wall(ctx.our_pos[0], ctx.our_pos[1], self.cfg.wall_threshold_cm):
+                elif _near_wall(ctx.our_pos[0], ctx.our_pos[1], self.cfg.wall_threshold_cm, self._arena_corners):
                     # No enemy nearby + at wall = wall crash
                     self._enter_wall_reverse(ctx, now)
                     return self._action_wall_reverse(ctx, now)
@@ -316,7 +348,7 @@ class BattleController:
                     self._push_commit_timer = None
                     if ctx.enemy_detected and ctx.enemy_pos is not None:
                         ex, ey = ctx.enemy_pos
-                        if _near_wall(ex, ey, self.cfg.wall_threshold_cm):
+                        if _near_wall(ex, ey, self.cfg.wall_threshold_cm, self._arena_corners):
                             # Pin!
                             self._enter_pin(now)
                             return self._action_pin(ctx, now)
@@ -357,7 +389,7 @@ class BattleController:
                 dt_pos = newest[2] - oldest[2]
                 if dt_pos > 0.5:  # need at least 0.5s of position history
                     displacement = math.hypot(newest[0] - oldest[0], newest[1] - oldest[1])
-                    at_wall = _near_wall(newest[0], newest[1], self.cfg.wall_threshold_cm)
+                    at_wall = _near_wall(newest[0], newest[1], self.cfg.wall_threshold_cm, self._arena_corners)
                     if at_wall and displacement < 5.0:
                         self._wall_stuck_frames += 1
                         if self._wall_stuck_frames > 5:  # confirmed stuck (already have 0.5s of history)
@@ -680,7 +712,7 @@ class BattleController:
         # Close range + near wall → PIN
         if ctx.distance_cm < self.cfg.charge_close_range_cm:
             ex, ey = ctx.enemy_pos
-            if _near_wall(ex, ey, self.cfg.wall_threshold_cm):
+            if _near_wall(ex, ey, self.cfg.wall_threshold_cm, self._arena_corners):
                 self._enter_pin(now)
                 return self._action_pin(ctx, now)
 
@@ -851,7 +883,7 @@ class BattleController:
         # Pulse to 0.4 if enemy starting to escape
         if ctx.enemy_tracking and ctx.enemy_pos is not None:
             ex, ey = ctx.enemy_pos
-            at_wall = _near_wall(ex, ey, self.cfg.wall_threshold_cm)
+            at_wall = _near_wall(ex, ey, self.cfg.wall_threshold_cm, self._arena_corners)
             if at_wall:
                 # Escaping? (distance increasing but still in range)
                 if ctx.distance_cm > self.cfg.charge_close_range_cm * 1.5:

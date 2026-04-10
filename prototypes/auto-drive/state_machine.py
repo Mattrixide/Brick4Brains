@@ -779,7 +779,7 @@ class BattleController:
         if ctx.enemy_detected and ctx.distance_cm < 10:
             self._reorient_timer = None
             self.machine.set_state("charge_pursue")
-            return self._action_charge_pursue(ctx, now)
+            return BattleOutput()  # next tick runs charge_pursue (avoid recursion)
 
         # Phase 1: Backup (0-0.25s)
         if elapsed < 0.25:
@@ -866,18 +866,24 @@ class BattleController:
         # NO ArUco-loss exit during pin — ArUco loss is EXPECTED
         # (marker pressed against wall/opponent). Pin timer is the only timeout.
 
-        # Enemy escaped? Only check if BOTH ArUco and enemy are visible
+        # Enemy escaped or no longer at wall? Exit pin early.
         # (0.5s grace period after pin entry to avoid bounce oscillation)
         pin_elapsed = now - self._pin_entry_time
-        if (pin_elapsed > 0.5
-                and ctx.enemy_tracking and ctx.our_detected
-                and ctx.distance_cm > self.cfg.pin_escape_range_cm):
-            self.pin_timer.reset()
-            self.machine.set_state("charge_pursue")
-            self._prev_steer = 0.0
-            self._acquire_count = self.cfg.acquire_frames + 1
-            log.info("[battle] PIN — enemy escaped (%.0fcm), re-engaging", ctx.distance_cm)
-            return self._action_charge_pursue(ctx, now)
+        if pin_elapsed > 0.5 and ctx.enemy_tracking and ctx.our_detected:
+            escaped = ctx.distance_cm > self.cfg.pin_escape_range_cm
+            enemy_left_wall = False
+            if ctx.enemy_pos is not None:
+                enemy_left_wall = not _near_wall(
+                    ctx.enemy_pos[0], ctx.enemy_pos[1],
+                    self.cfg.wall_threshold_cm, self._arena_corners)
+            if escaped or enemy_left_wall:
+                self.pin_timer.reset()
+                self.machine.set_state("charge_pursue")
+                self._prev_steer = 0.0
+                self._acquire_count = self.cfg.acquire_frames + 1
+                reason = "escaped" if escaped else "left wall"
+                log.info("[battle] PIN — enemy %s (%.0fcm), re-engaging", reason, ctx.distance_cm)
+                return self._action_charge_pursue(ctx, now)
 
         # Hold with low forward pressure (0.2) — opponent fights back
         # Pulse to 0.4 if enemy starting to escape

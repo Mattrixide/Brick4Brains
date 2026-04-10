@@ -1524,8 +1524,9 @@ class AutoDriveApp:
                     # ArUco marker box corners in cm
                     "ab": [[round(c[0], 1), round(c[1], 1)] for c in self._aruco_corners_cm] if hasattr(self, '_aruco_corners_cm') and self._aruco_corners_cm is not None else None,
                     # Enemy raw detection position in cm (for yellow targeting box)
-                    "edx": round(float(self._enemy_tracker._last_detection_cm[0]), 1) if self._enemy_tracker._last_detection_cm is not None else None,
-                    "edy": round(float(self._enemy_tracker._last_detection_cm[1]), 1) if self._enemy_tracker._last_detection_cm is not None else None,
+                    # Note: _last_detection_cm is actually in METERS (Kalman internal units)
+                    "edx": round(float(self._enemy_tracker._last_detection_cm[0]) * 100.0, 1) if self._enemy_tracker._last_detection_cm is not None else None,
+                    "edy": round(float(self._enemy_tracker._last_detection_cm[1]) * 100.0, 1) if self._enemy_tracker._last_detection_cm is not None else None,
                     # Enemy bounding box (contour bounding rect in cm)
                     "eb": self._get_enemy_bbox_cm() if has_enemy else None,
                     # FPS

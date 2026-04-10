@@ -200,11 +200,19 @@ class SimBridge:
             self.robot._rate_mode_omega = -math.radians(output.target_omega_dps)
             self.robot._rate_mode_speed = output.target_speed
 
-            # Forward force from target_speed
+            # Forward force from target_speed, or brake if near zero
             if abs(output.target_speed) > 0.01:
                 self.robot.body.apply_force_at_local_point(
                     (output.target_speed * self.cfg.max_forward_force, 0), (0, 0)
                 )
+            else:
+                # ESC brake in rate mode — stop forward motion
+                vx, vy = self.robot.body.velocity
+                cos_a = math.cos(self.robot.body.angle)
+                sin_a = math.sin(self.robot.body.angle)
+                v_fwd = vx * cos_a + vy * sin_a
+                brake = -v_fwd * self.robot.mass * 30.0
+                self.robot.body.apply_force_at_local_point((brake, 0), (0, 0))
         else:
             # Direct mode
             self.robot.apply_drive(output.throttle, output.steering, self.cfg)

@@ -952,19 +952,29 @@ class BattleController:
             log.info("[battle] PIT PUSH — in herding position")
             return self._action_pit_push(ctx, now)
 
-        if abs(alpha) > 1.0:
-            return BattleOutput(
-                throttle=0.0,
-                steering=0.6 if alpha > 0 else -0.6,
-            )
+        # Rate mode: omega from heading error, speed from distance
+        Kp_omega = 200.0
+        omega = -Kp_omega * alpha
+        omega = max(-300.0, min(300.0, omega))
 
-        throttle = min(0.8, 0.4 + dist_to_herd / 100.0)
-        steering = max(-0.6, min(0.6, alpha * 0.6))
-        return BattleOutput(throttle=throttle, steering=steering)
+        if abs(alpha) > 1.0:
+            # Large heading error — spin in place
+            speed = 0.0
+        else:
+            speed = min(0.8, 0.4 + dist_to_herd / 100.0)
+            speed *= math.cos(alpha) ** 2  # slow for turns
+            # Slow down near pit to avoid overshooting into it
+            if self_dist_to_pit < self.cfg.pit_danger_radius_cm * 2.5:
+                speed = min(speed, 0.4)
+
+        return BattleOutput(target_omega_dps=omega, target_speed=speed)
 
     def _action_pit_push(self, ctx: BattleContext, now: float) -> BattleOutput:
         """Push enemy toward pit."""
+        if not hasattr(self, '_pit_push_entry'):
+            self._pit_push_entry = now
         if ctx.enemy_pos is None:
+            self._pit_push_entry = None
             self.machine.set_state("pit_position")
             return BattleOutput()
 
@@ -973,7 +983,9 @@ class BattleController:
         self_dist = math.hypot(
             ctx.our_pos[0] - pit[0], ctx.our_pos[1] - pit[1]
         )
-        if self_dist < self.cfg.pit_danger_radius_cm:
+        # Abort well before pit edge — robot body extends ~11cm past center
+        abort_dist = self.cfg.pit_danger_radius_cm + 15.0
+        if self_dist < abort_dist:
             self.machine.set_state("pit_abort")
             self._pit_abort_timer = now
             return self._action_pit_abort(ctx, now)
@@ -990,13 +1002,28 @@ class BattleController:
             pit[1] - ctx.our_pos[1], pit[0] - ctx.our_pos[0]
         )
         alpha = _angle_diff(desired_heading, ctx.our_heading_rad)
-        steering = max(-0.5, min(0.5, alpha * 0.6))
 
-        throttle = 1.0
-        if self_dist < self.cfg.pit_danger_radius_cm * 1.2:
-            throttle = 0.5
+        # Rate mode: controlled push toward pit
+        Kp_omega = 200.0
+        omega = -Kp_omega * alpha
+        omega = max(-300.0, min(300.0, omega))
 
-        return BattleOutput(throttle=throttle, steering=steering)
+        # Brief brake phase on entry (0.15s) to kill approach momentum
+        push_elapsed = now - self._pit_push_entry
+        if push_elapsed < 0.15:
+            return BattleOutput(target_omega_dps=omega, target_speed=0.0)
+
+        # Speed scaled by distance to pit — never full speed
+        danger = self.cfg.pit_danger_radius_cm
+        if self_dist < danger * 1.5:
+            speed = 0.25  # crawl near pit
+        elif self_dist < danger * 2.5:
+            speed = 0.5   # moderate
+        else:
+            speed = 0.7   # controlled, not full speed
+        speed *= math.cos(alpha) ** 2  # slow for turns
+
+        return BattleOutput(target_omega_dps=omega, target_speed=speed)
 
     def _action_pit_commit(self, ctx: BattleContext, now: float) -> BattleOutput:
         """Max power push at pit edge."""
@@ -1010,7 +1037,13 @@ class BattleController:
             log.info("[battle] PIT ABORT — self too close during commit")
             return self._action_pit_abort(ctx, now)
 
-        return BattleOutput(throttle=1.0, steering=0.0)
+        # Rate mode: full speed, hold heading toward pit
+        pit = (self.cfg.pit_x_cm, self.cfg.pit_y_cm)
+        desired = math.atan2(pit[1] - ctx.our_pos[1], pit[0] - ctx.our_pos[0])
+        alpha = _angle_diff(desired, ctx.our_heading_rad)
+        omega = -200.0 * alpha
+        omega = max(-300.0, min(300.0, omega))
+        return BattleOutput(target_omega_dps=omega, target_speed=1.0)
 
     def _action_pit_abort(self, ctx: BattleContext, now: float) -> BattleOutput:
         """Retreat away from pit."""
@@ -1029,11 +1062,16 @@ class BattleController:
         )
         alpha = _angle_diff(away_angle, ctx.our_heading_rad)
 
+        # Rate mode: drive away from pit
+        Kp_omega = 150.0
+        omega = -Kp_omega * alpha
+        omega = max(-200.0, min(200.0, omega))
+
         if abs(alpha) > math.pi / 2:
-            return BattleOutput(throttle=-0.6, steering=0.0)
+            # Facing pit — reverse
+            return BattleOutput(target_omega_dps=omega, target_speed=-0.5)
         else:
-            steering = max(-0.4, min(0.4, alpha * 0.4))
-            return BattleOutput(throttle=0.5, steering=steering)
+            return BattleOutput(target_omega_dps=omega, target_speed=0.5)
 
     # -- Evade actions ------------------------------------------------------
 

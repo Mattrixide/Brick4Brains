@@ -218,6 +218,9 @@ class BattleController:
         # Recovery cycle breaker
         self._recovery_cycle_count = 0
 
+        # Contact stalemate detector
+        self._contact_stall_frames = 0
+
         # Goto center
         self._goto_center_target: tuple[float, float] | None = None
 
@@ -669,6 +672,7 @@ class BattleController:
         self.pin_timer.start()
         self._pin_entry_time = now
         self._pin_count += 1
+        self._contact_stall_frames = 0  # reset stalemate detector
         # Don't reset recovery counter here — short micro-pins (0.5s) along walls
         # shouldn't count as "successful recovery" for the cycle breaker
         log.info("[battle] PIN — holding (#%d)", self._pin_count)
@@ -750,6 +754,22 @@ class BattleController:
 
     def _action_charge_pursue(self, ctx: BattleContext, now: float) -> BattleOutput:
         """PN guidance toward enemy — throttle scales with distance, max at close range."""
+        # Contact stalemate: dist≈0, speed≈0 for too long → break off
+        # Skip if enemy is near wall (pin is about to trigger)
+        speed = math.hypot(ctx.our_velocity[0], ctx.our_velocity[1])
+        enemy_near_wall = (ctx.enemy_pos is not None and
+                          _near_wall(ctx.enemy_pos[0], ctx.enemy_pos[1],
+                                     self.cfg.wall_threshold_cm, self._arena_corners))
+        if ctx.distance_cm < 5 and speed < 5 and not enemy_near_wall:
+            self._contact_stall_frames += 1
+            if self._contact_stall_frames > 120:  # 2 seconds of stalemate
+                self._contact_stall_frames = 0
+                log.info("[battle] CONTACT STALEMATE — retreating to disengage")
+                self._enter_retreat(reason="contact_stalemate"  )
+                return self._action_evade_retreat(ctx, now)
+        else:
+            self._contact_stall_frames = 0
+
         if ctx.enemy_pos is None:
             # Brief dropout — drive toward last known position instead of stopping
             if self._last_enemy_pos is not None:
@@ -1171,7 +1191,11 @@ class BattleController:
 
         retreat_time = self.cfg.reverse_duration_s
         if ctx.enemy_tracking and self.cfg.strategy != "evade":
-            retreat_time = min(retreat_time, 0.8)
+            # Stalemate retreat needs more time to disengage
+            if self._last_retreat_reason == "contact_stalemate":
+                retreat_time = min(retreat_time, 1.5)
+            else:
+                retreat_time = min(retreat_time, 0.8)
 
         if elapsed > retreat_time:
             self._retreat_timer = None

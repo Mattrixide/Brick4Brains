@@ -16,6 +16,7 @@ from sim.arena import SimArena
 from sim.renderer import SimRenderer
 from sim.config import SimConfig
 from sim.bridge import SimBridge
+from sim.enemy_ai import EnemyController, MODES
 
 AUTO_DRIVE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 LOGS_DIR = os.path.join(AUTO_DRIVE_DIR, "logs")
@@ -151,6 +152,7 @@ def main():
     strategy_idx = 0
     brick_bridge = SimBridge(arena.brick, cfg, strategy_override=strategies[strategy_idx])
     logger = SimLogger(arena, brick_bridge)
+    enemy_ctrl = EnemyController()
     font = pygame.font.SysFont("consolas", 14)
     font_large = pygame.font.SysFont("consolas", 18)
 
@@ -181,12 +183,17 @@ def main():
                     logger = SimLogger(arena, brick_bridge)
                     match_started = False
                     print(f"Strategy: {strategies[strategy_idx].upper()}")
+                elif event.key in (pygame.K_1, pygame.K_2, pygame.K_3,
+                                    pygame.K_4, pygame.K_5, pygame.K_6):
+                    mode_idx = event.key - pygame.K_1
+                    enemy_ctrl.set_mode(MODES[mode_idx])
                 elif event.key == pygame.K_r:
                     if logging_on:
                         logger.stop()
                         logging_on = False
                     arena.reset()
                     brick_bridge.reset()
+                    enemy_ctrl.reset()
                     match_started = False
                     paused = True
 
@@ -214,19 +221,24 @@ def main():
                     brick_steering = -1.0
                 arena.brick.apply_drive(brick_throttle, brick_steering, arena.cfg)
 
-            # Enemy: Arrow keys (only apply drive if keys pressed)
-            enemy_throttle = 0.0
-            enemy_steering = 0.0
-            if keys[pygame.K_UP]:
-                enemy_throttle = 1.0
-            elif keys[pygame.K_DOWN]:
-                enemy_throttle = -1.0
-            if keys[pygame.K_LEFT]:
-                enemy_steering = 1.0
-            elif keys[pygame.K_RIGHT]:
-                enemy_steering = -1.0
-            if abs(enemy_throttle) > 0.01 or abs(enemy_steering) > 0.01:
-                arena.enemy.apply_drive(enemy_throttle, enemy_steering, arena.cfg)
+            # Enemy: manual (arrow keys) or AI mode
+            if enemy_ctrl.mode == "manual":
+                enemy_throttle = 0.0
+                enemy_steering = 0.0
+                if keys[pygame.K_UP]:
+                    enemy_throttle = 1.0
+                elif keys[pygame.K_DOWN]:
+                    enemy_throttle = -1.0
+                if keys[pygame.K_LEFT]:
+                    enemy_steering = 1.0
+                elif keys[pygame.K_RIGHT]:
+                    enemy_steering = -1.0
+                if abs(enemy_throttle) > 0.01 or abs(enemy_steering) > 0.01:
+                    arena.enemy.apply_drive(enemy_throttle, enemy_steering, arena.cfg)
+            else:
+                result = enemy_ctrl.get_drive(arena.enemy, arena.brick, dt, arena.cfg)
+                if result is not None:
+                    arena.enemy.apply_drive(result[0], result[1], arena.cfg)
 
             arena.step()
 
@@ -247,6 +259,10 @@ def main():
             ai_label = font.render(f"AI: {brick_bridge.state}  [{strategies[strategy_idx].upper()}]", True, (0, 200, 255))
             screen.blit(ai_label, (10, 75))
 
+        if enemy_ctrl.mode != "manual":
+            enemy_mode_label = font.render(f"Enemy: {enemy_ctrl.mode.upper()}", True, (255, 160, 0))
+            screen.blit(enemy_mode_label, (10, 95))
+
         bv = arena.brick.velocity
         brick_speed = math.hypot(bv[0], bv[1])
         ev = arena.enemy.velocity
@@ -265,7 +281,7 @@ def main():
             screen.blit(log_label, (win_size - 40, 10))
 
         hint = font.render(
-            "WASD=Brick  Arrows=Enemy  B=AI  T=Strategy  L=Log  Space=Pause  R=Reset",
+            "WASD=Brick  Arrows=Enemy  B=AI  T=Strat  1-6=EnemyMode  L=Log  Space=Pause  R=Reset",
             True, (140, 140, 140))
         screen.blit(hint, (10, win_size - 25))
 

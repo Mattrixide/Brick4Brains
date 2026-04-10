@@ -203,3 +203,13 @@ class SimRenderer:
             label_font = pygame.font.SysFont("consolas", 28, bold=True)
             label_surf = label_font.render("PINNING", True, (100, 255, 0))
             screen.blit(label_surf, (sw // 2 - label_surf.get_width() // 2, sh // 2 - 90))
+
+        # Match over
+        if bridge.match_timer.is_expired:
+            big_font = pygame.font.SysFont("consolas", 48, bold=True)
+            # Shadow
+            shadow = big_font.render("BATTLE OVER!", True, (0, 0, 0))
+            screen.blit(shadow, (sw // 2 - shadow.get_width() // 2 + 3, sh // 2 - 20 + 3))
+            # Foreground
+            over_surf = big_font.render("BATTLE OVER!", True, (255, 50, 50))
+            screen.blit(over_surf, (sw // 2 - over_surf.get_width() // 2, sh // 2 - 20))

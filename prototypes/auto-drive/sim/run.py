@@ -31,7 +31,7 @@ def main():
     paused = True
     brick_ai = False
     match_started = False
-    brick_bridge = SimBridge(arena.brick, cfg)
+    brick_bridge = SimBridge(arena.brick, cfg, strategy_override="charge")
     font = pygame.font.SysFont("consolas", 14)
     font_large = pygame.font.SysFont("consolas", 18)
 

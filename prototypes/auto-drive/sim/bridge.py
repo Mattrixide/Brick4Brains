@@ -20,7 +20,8 @@ def _clamp(v, lo, hi):
 class SimBridge:
     """Connects a SimRobot to a BattleController so the AI can drive it."""
 
-    def __init__(self, robot: SimRobot, cfg: SimConfig, battle_config_path=None):
+    def __init__(self, robot: SimRobot, cfg: SimConfig, battle_config_path=None,
+                 strategy_override=None):
         self.robot = robot
         self.cfg = cfg
 
@@ -29,6 +30,11 @@ class SimBridge:
 
         self.battle_config = BattleConfig.load(battle_config_path)
         self._battle_config_path = battle_config_path
+
+        # Override strategy without modifying the real config file
+        if strategy_override:
+            self.battle_config.strategy = strategy_override
+            self.battle_config.opening_strategy = strategy_override
 
         self._build_controller()
 

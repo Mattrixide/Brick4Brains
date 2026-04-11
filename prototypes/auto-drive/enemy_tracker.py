@@ -6,8 +6,12 @@ Our robot is excluded using ArUco bounding box proximity (works on mono/grayscal
 """
 
 import math
+import logging
+import time
 import numpy as np
 import cv2
+
+log = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
@@ -215,6 +219,7 @@ class EnemyDetector:
         self._arena_pts = None
         self._last_fg_mask = None
         self._track_lock_px = None
+        self._heal_protect = False  # set by EnemyTracker: True = protect from healing
 
         # Previous frame for temporal diff (detects moving objects)
         self._prev_gray = None
@@ -352,7 +357,7 @@ class EnemyDetector:
             if blurred_full.shape == self._reference_gray.shape:
                 heal_mask = np.ones((fh, fw), dtype=np.uint8) * 255
                 cv2.fillPoly(heal_mask, [self._robot_footprint], 0)
-                if self._track_lock_px is not None:
+                if self._track_lock_px is not None and self._heal_protect:
                     ex, ey = int(self._track_lock_px[0]), int(self._track_lock_px[1])
                     cv2.circle(heal_mask, (ex, ey), 60, 0, -1)
                 alpha_heal = 0.05 * 10  # compensate for running every 10 frames
@@ -666,6 +671,15 @@ class EnemyTracker:
         self._last_detection_px = None
         self._last_detection_cm = None
 
+        # Phantom displacement gate — uses raw detection means (not Kalman)
+        self._det_accum = []                # list of (x_m, y_m) raw detections in current window
+        self._det_window_start = 0.0        # time.perf_counter() when current window started
+        self._prev_window_mean = None       # mean position of previous window (meters)
+        self._was_ever_moving = False        # True if displacement ever exceeded 10cm between windows
+        self._stationary_windows = 0         # consecutive windows with displacement < 5cm
+        self._gate_cooldown = 0              # frames to suppress re-detection after gate fires
+        self._gate_cooldown_px = None        # pixel position to suppress (from _track_lock_px)
+
     def update(self, frame, our_robot_corners=None, px_to_cm=None,
                use_reference_diff=True):
         """Run detection + Kalman update for this frame."""
@@ -680,9 +694,25 @@ class EnemyTracker:
             det_px = None
             self._aruco_reacquire_cooldown -= 1
         else:
+            # Post-gate cooldown: suppress re-detection at old phantom position
+            if self._gate_cooldown > 0:
+                self._gate_cooldown -= 1
+
+            # Healing protection: protect tracked region while Kalman is actively tracking
+            self.detector._heal_protect = self.kalman.is_tracking
+
             predicted_px = self._last_detection_px
             det_px = self.detector.detect(frame, our_robot_corners,
                                            predicted_px=predicted_px)
+
+        # Suppress re-detection near old phantom position during cooldown
+        if self._gate_cooldown > 0 and det_px is not None and self._gate_cooldown_px is not None:
+            dist_to_old = math.sqrt(
+                (det_px[0] - self._gate_cooldown_px[0])**2 +
+                (det_px[1] - self._gate_cooldown_px[1])**2
+            )
+            if dist_to_old < 80:  # within 80px of old phantom — suppress
+                det_px = None
 
         # Convert to world coordinates if detection available
         det_cm = None
@@ -727,6 +757,56 @@ class EnemyTracker:
         # Kalman predict + update
         self.kalman.predict()
         self.kalman.update(det_cm)
+
+        # Raw-detection displacement gate — detect stationary phantom tracks
+        now_t = time.perf_counter()
+        if det_cm is not None:
+            self._det_accum.append(det_cm)
+
+            if self._det_window_start == 0.0:
+                self._det_window_start = now_t
+
+            if now_t - self._det_window_start >= 1.0 and len(self._det_accum) >= 25:
+                accum = np.array(self._det_accum)
+                window_mean = accum.mean(axis=0)
+
+                if self._prev_window_mean is not None:
+                    displacement_cm = np.linalg.norm(window_mean - self._prev_window_mean) * 100.0
+
+                    if displacement_cm > 10.0:
+                        self._was_ever_moving = True
+
+                    if displacement_cm < 5.0:
+                        self._stationary_windows += 1
+                    else:
+                        self._stationary_windows = 0
+
+                    if not self._was_ever_moving and self._stationary_windows >= 1:
+                        log.info(
+                            "[tracker] PHANTOM GATE — displacement %.1fcm, never moved, dropping",
+                            displacement_cm)
+                        self._gate_cooldown = 20
+                        self._gate_cooldown_px = (
+                            self.detector._track_lock_px if self.detector._track_lock_px is not None
+                            else None
+                        )
+                        self.kalman.reset()
+                        self._det_accum = []
+                        self._det_window_start = 0.0
+                        self._prev_window_mean = None
+                        self._was_ever_moving = False
+                        self._stationary_windows = 0
+                        self.detector._track_lock_px = None
+                        self._last_detection_px = None
+                        self._last_detection_cm = None
+                    else:
+                        self._prev_window_mean = window_mean.copy()
+                        self._det_accum = []
+                        self._det_window_start = now_t
+                else:
+                    self._prev_window_mean = window_mean.copy()
+                    self._det_accum = []
+                    self._det_window_start = now_t
 
         # Orientation estimation (velocity + shape)
         vel = self.velocity_cm_s if self.kalman._initialized else None

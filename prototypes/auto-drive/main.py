@@ -1495,6 +1495,13 @@ class AutoDriveApp:
                     imu_dt_skips = tel_data.get("imu_dt_skips", 0)
                     imu_fails_total = tel_data.get("imu_fails_total", 0)
 
+                e_stw = self._enemy_tracker._stationary_windows
+                e_ever_moved = self._enemy_tracker._was_ever_moving
+                e_disp = 0.0
+                if self._enemy_tracker._prev_window_mean is not None and self._enemy_tracker.kalman._initialized:
+                    pos_m = self._enemy_tracker.kalman.position
+                    e_disp = round(float(np.linalg.norm(pos_m - self._enemy_tracker._prev_window_mean)) * 100.0, 1)
+
                 rec = {
                     "f": self._frame_count,
                     "t": round(now, 4),
@@ -1518,6 +1525,7 @@ class AutoDriveApp:
                     "urg": round(urg, 3) if urg is not None else None,
                     "ax": round(tel_ax, 0), "ay": round(tel_ay, 0),
                     "imu_fails": imu_fails, "imu_dt_skips": imu_dt_skips, "imu_fails_total": imu_fails_total,
+                    "e_stw": e_stw, "e_moved": e_ever_moved, "e_disp": e_disp,
                     "rm": 1 if getattr(self, '_rate_mode_active', False) else 0,
                     # Robot footprint polygon in cm (for replay visualization)
                     "fp": self._get_footprint_cm(),
